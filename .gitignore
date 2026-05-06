@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+*.log
+.vite/
+*.review.yaml.bak
+playwright-report/
+test-results/

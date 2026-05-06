@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": ".",
+    "composite": true,
+    "tsBuildInfoFile": "./dist/.tsbuildinfo",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "web/**/*"],
+  "references": [
+    { "path": "../../packages/core" },
+    { "path": "../../packages/react" }
+  ]
+}

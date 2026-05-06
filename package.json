@@ -1,0 +1,21 @@
+{
+  "name": "mark-it-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "mark-it": "bun apps/cli/src/index.ts",
+    "build": "bun run --filter '@mark-it/*' build",
+    "typecheck": "tsc -b",
+    "test": "bun run --filter '@mark-it/*' test",
+    "test:e2e": "bun --cwd apps/cli run test:e2e"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}
