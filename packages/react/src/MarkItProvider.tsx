@@ -29,18 +29,21 @@ export interface CommentAddInput {
   line: number;
   end_line?: number;
   selected_text?: string;
+  x_user_id?: string;
 }
 
 export interface CommentReplyInput {
   parentId: string;
   text: string;
   author: string;
+  x_user_id?: string;
 }
 
 export interface CommentEditInput {
   commentId: string;
   text: string;
   actor?: string;
+  x_user_id?: string;
 }
 
 export interface DeleteOptions {
@@ -64,6 +67,7 @@ export interface MarkItContextValue {
   documentPath: string;
   documentName: string;
   author: string;
+  userId: string | null;
   viewMode: ViewMode;
   setViewMode: (mode: ViewMode) => void;
   store: Store<MarkItState>;
@@ -78,6 +82,7 @@ export interface MarkItProviderProps {
   documentPath: string;
   documentName?: string;
   author: string;
+  userId?: string | null;
   /** Controlled MrsfDocument: external updates (e.g. SSE) flow into the store. */
   doc: MrsfDocument;
   initialViewMode?: ViewMode;
@@ -96,6 +101,7 @@ export function MarkItProvider({
   documentPath,
   documentName,
   author,
+  userId = null,
   doc,
   initialViewMode = "rendered",
   commentApi,
@@ -132,19 +138,26 @@ export function MarkItProvider({
     [transports],
   );
 
+  // When the active document changes, drop transient UI state (draft / edit) so
+  // the new doc doesn't inherit a stale draft anchor or editing target.
+  useEffect(() => {
+    store.setState((s) => closeEdit(closeDraft(s)));
+  }, [documentPath, store]);
+
   const value = useMemo<MarkItContextValue>(
     () => ({
       source,
       documentPath,
       documentName: documentName ?? documentPath,
       author,
+      userId,
       viewMode,
       setViewMode,
       store,
       commentApi,
       transports: wrappedTransports,
     }),
-    [source, documentPath, documentName, author, viewMode, store, commentApi, wrappedTransports],
+    [source, documentPath, documentName, author, userId, viewMode, store, commentApi, wrappedTransports],
   );
   return (
     <Ctx.Provider value={value}>
@@ -305,65 +318,79 @@ export function useMarkItState(): MarkItState {
 }
 
 export function useStoreActions() {
-  const { store, commentApi, author } = useMarkIt();
-  return useMemo(() => ({
-    openDraft(anchor: DraftAnchor) {
-      store.setState((s) => openDraft(s, anchor));
-    },
-    closeDraft() {
-      store.setState((s) => closeDraft(s));
-    },
-    async submitDraft(text: string) {
-      const draft = store.getState().draft;
-      if (!draft) throw new Error("submitDraft called with no active draft");
-      const doc = await commentApi.add({
-        text,
-        author,
-        line: draft.line,
-        end_line: draft.end_line,
-        selected_text: draft.selected_text,
-      });
-      store.setState((s) => setDoc(closeDraft(s), doc));
-      return doc;
-    },
-    async reply(parentId: string, text: string) {
-      const doc = await commentApi.reply({ parentId, text, author });
-      store.setState((s) => setDoc(s, doc));
-      return doc;
-    },
-    async editComment(commentId: string, text: string) {
-      const doc = await commentApi.edit({ commentId, text, actor: author });
-      store.setState((s) => setDoc(closeEdit(s), doc));
-      return doc;
-    },
-    startEdit(commentId: string) {
-      store.setState((s) => openEdit(s, commentId));
-    },
-    cancelEdit() {
-      store.setState((s) => closeEdit(s));
-    },
-    async resolve(commentId: string) {
-      const doc = await commentApi.resolve(commentId);
-      store.setState((s) => setDoc(s, doc));
-      return doc;
-    },
-    async unresolve(commentId: string) {
-      const doc = await commentApi.unresolve(commentId);
-      store.setState((s) => setDoc(s, doc));
-      return doc;
-    },
-    async deleteComment(commentId: string, opts?: { cascade?: boolean }) {
-      const doc = await commentApi.delete(commentId, opts);
-      store.setState((s) => setDoc(s, doc));
-      return doc;
-    },
-    async resolveAll() {
-      const doc = await commentApi.resolveAll();
-      store.setState((s) => setDoc(s, doc));
-      return doc;
-    },
-    setDoc(doc: MrsfDocument) {
-      store.setState((s) => setDoc(s, doc));
-    },
-  }), [store, commentApi, author]);
+  const { store, commentApi, author, userId } = useMarkIt();
+  return useMemo(
+    () => ({
+      openDraft(anchor: DraftAnchor) {
+        store.setState((s) => openDraft(s, anchor));
+      },
+      closeDraft() {
+        store.setState((s) => closeDraft(s));
+      },
+      async submitDraft(text: string) {
+        const draft = store.getState().draft;
+        if (!draft) throw new Error("submitDraft called with no active draft");
+        const doc = await commentApi.add({
+          text,
+          author,
+          x_user_id: userId ?? undefined,
+          line: draft.line,
+          end_line: draft.end_line,
+          selected_text: draft.selected_text,
+        });
+        store.setState((s) => setDoc(closeDraft(s), doc));
+        return doc;
+      },
+      async reply(parentId: string, text: string) {
+        const doc = await commentApi.reply({
+          parentId,
+          text,
+          author,
+          x_user_id: userId ?? undefined,
+        });
+        store.setState((s) => setDoc(s, doc));
+        return doc;
+      },
+      async editComment(commentId: string, text: string) {
+        const doc = await commentApi.edit({
+          commentId,
+          text,
+          actor: author,
+          x_user_id: userId ?? undefined,
+        });
+        store.setState((s) => setDoc(closeEdit(s), doc));
+        return doc;
+      },
+      startEdit(commentId: string) {
+        store.setState((s) => openEdit(s, commentId));
+      },
+      cancelEdit() {
+        store.setState((s) => closeEdit(s));
+      },
+      async resolve(commentId: string) {
+        const doc = await commentApi.resolve(commentId);
+        store.setState((s) => setDoc(s, doc));
+        return doc;
+      },
+      async unresolve(commentId: string) {
+        const doc = await commentApi.unresolve(commentId);
+        store.setState((s) => setDoc(s, doc));
+        return doc;
+      },
+      async deleteComment(commentId: string, opts?: { cascade?: boolean }) {
+        const doc = await commentApi.delete(commentId, opts);
+        store.setState((s) => setDoc(s, doc));
+        return doc;
+      },
+      async resolveAll() {
+        const doc = await commentApi.resolveAll();
+        store.setState((s) => setDoc(s, doc));
+        return doc;
+      },
+      setDoc(doc: MrsfDocument) {
+        store.setState((s) => setDoc(s, doc));
+      },
+    }),
+    [store, commentApi, author, userId],
+  );
 }

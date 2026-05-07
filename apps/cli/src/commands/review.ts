@@ -1,0 +1,104 @@
+import { defineCommand } from "citty";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
+import { startServer } from "../server.js";
+import { openDbForCommand, requireOrg, normaliseHandle } from "./util.js";
+import { findUserByHandle, upsertProject, upsertDocument } from "../db/queries.js";
+
+export const reviewCommand = defineCommand({
+  meta: { name: "review", description: "Open a Markdown file in mark-it's review UI." },
+  args: {
+    file: {
+      type: "positional",
+      description: "Path to the Markdown file. Omit to read from stdin.",
+      required: false,
+    },
+    port: {
+      type: "string",
+      description: "Port to bind the dev server to (default: 5173).",
+      default: "5173",
+    },
+    "no-open": {
+      type: "boolean",
+      description: "Do not auto-open the browser.",
+      default: false,
+    },
+    org: { type: "string", required: false },
+    project: { type: "string", required: false },
+    user: { type: "string", required: false },
+    "doc-name": { type: "string", required: false },
+    db: { type: "string", required: false },
+  },
+  async run({ args }) {
+    const filePath = await resolveSource(args.file);
+    const port = Number(args.port) || 5173;
+    const open = !args["no-open"];
+
+    const dbBacked = args.org && args.project && args.user;
+    if (!dbBacked) {
+      await startServer({ port, open, initialActive: { filePath } });
+      return;
+    }
+
+    const { db } = openDbForCommand({ db: args.db });
+    const org = requireOrg(db, args.org!);
+    const handle = normaliseHandle(args.user!);
+    const user = findUserByHandle(db, org.id, handle);
+    if (!user) {
+      console.error(`mark-it: user ${handle} is not a member of org ${org.name}`);
+      process.exit(1);
+    }
+    const project = upsertProject(db, org.id, args.project!);
+    const docName = args["doc-name"] ?? basename(filePath);
+    const document = upsertDocument(db, project.id, filePath, docName);
+
+    await startServer({
+      port,
+      open,
+      db,
+      session: {
+        orgId: org.id,
+        orgName: org.name,
+        userId: user.id,
+        userHandle: user.handle,
+      },
+      initialActive: {
+        filePath,
+        documentId: document.id,
+        documentName: document.name,
+        projectId: project.id,
+        projectName: project.name,
+      },
+    });
+  },
+});
+
+async function resolveSource(maybePath: string | undefined): Promise<string> {
+  if (maybePath) {
+    const abs = resolve(process.cwd(), maybePath);
+    if (!existsSync(abs)) {
+      console.error(`mark-it: file not found: ${abs}`);
+      process.exit(1);
+    }
+    return abs;
+  }
+
+  // Read stdin into a temp file.
+  if (process.stdin.isTTY) {
+    console.error("mark-it: pass a file path or pipe Markdown into stdin.");
+    process.exit(1);
+  }
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  const content = Buffer.concat(chunks).toString("utf8");
+
+  const dir = mkdtempSync(join(tmpdir(), "mark-it-"));
+  const tmpPath = join(dir, "stdin.md");
+  writeFileSync(tmpPath, content, "utf8");
+  console.error(`mark-it: stdin captured to ${tmpPath}`);
+  return tmpPath;
+}

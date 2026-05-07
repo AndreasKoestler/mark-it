@@ -6,9 +6,9 @@
     "composite": true,
     "tsBuildInfoFile": "./dist/.tsbuildinfo",
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node", "bun"]
   },
-  "include": ["src/**/*", "web/**/*"],
+  "include": ["src/**/*", "web/**/*", "tests/**/*", "vitest.config.ts"],
   "references": [
     { "path": "../../packages/core" },
     { "path": "../../packages/react" }

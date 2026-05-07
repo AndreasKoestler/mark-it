@@ -5,10 +5,7 @@ import { spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import chokidar from "chokidar";
 import {
-  parseSidecar,
-  writeSidecar,
   addComment,
   editComment,
   resolveComment,
@@ -19,14 +16,51 @@ import {
   type MrsfDocument,
   type AddCommentOptions,
 } from "@mrsf/cli";
+import type { Db } from "./db/index.js";
+import { createActiveDocument, type ActiveDocument } from "./active-document.js";
+import { markItSessionPlugin } from "./plugins/session.js";
+import { markItTreePlugin } from "./plugins/tree.js";
+
+export interface Session {
+  orgId: string;
+  orgName: string;
+  userId: string;
+  userHandle: string;
+}
+
+export interface ActiveDocumentSpec {
+  filePath: string;
+  documentId?: string;
+  documentName?: string;
+  projectId?: string;
+  projectName?: string;
+}
 
 export interface StartServerOptions {
-  filePath: string;
   port: number;
   open: boolean;
+  db?: Db;
+  session?: Session | null;
+  initialActive: ActiveDocumentSpec;
 }
 
 const WEB_ROOT = new URL("../web/", import.meta.url).pathname;
+
+class IdentityError extends Error {}
+
+function enforceIdentity(session: Session | null, action: string, payload: unknown): void {
+  if (!session) return; // legacy bare-file mode
+  if (process.env.MARK_IT_ALLOW_AUTHOR_OVERRIDE === "1") return;
+  // Mutations that don't carry an author are pure references (resolve/unresolve/delete
+  // by id, resolveAll). Skip them — we still trust the pinned local server boundary.
+  const writeActions = new Set(["add", "reply", "edit"]);
+  if (!writeActions.has(action)) return;
+  const p = payload as { author?: string; actor?: string; x_user_id?: string };
+  const author = p.author ?? p.actor;
+  if (author !== session.userHandle || p.x_user_id !== session.userId) {
+    throw new IdentityError("403: identity mismatch");
+  }
+}
 
 /**
  * Turns "tab closed" into a process exit.
@@ -36,15 +70,6 @@ const WEB_ROOT = new URL("../web/", import.meta.url).pathname;
  * grace timer on bye; a new SSE connect within the window cancels it (this
  * is what absorbs page reloads — pagehide → bye, then the reload connects
  * fresh and we cancel).
- *
- * We deliberately do NOT use SSE socket close as an exit trigger. Node's
- * `req.on("close")` is unreliable on Vite's connect middleware for idle
- * keep-alive sockets — empirically, killing the client doesn't always fire
- * the event. The bye beacon side-steps that entirely.
- *
- * Known limitation: closing one of multiple tabs viewing the same file will
- * trigger an exit that kills the other tabs' SSE streams. Multi-tab review
- * isn't supported in v1.
  */
 const IDLE_EXIT_GRACE_MS = Number(process.env.MARK_IT_IDLE_EXIT_GRACE_MS) || 3_000;
 
@@ -58,8 +83,6 @@ function createLifecycle(): Lifecycle {
   const clients = new Set<ServerResponse>();
   let everSawClient = false;
   let exitTimer: NodeJS.Timeout | null = null;
-
-  // Opt-out for harnesses that don't run a real browser tab.
   const autoExitDisabled = process.env.MARK_IT_NO_AUTO_EXIT === "1";
 
   function scheduleExit() {
@@ -91,31 +114,28 @@ function createLifecycle(): Lifecycle {
 }
 
 export async function startServer(opts: StartServerOptions): Promise<void> {
-  const sidecarPath = `${opts.filePath}.review.yaml`;
   const lifecycle = createLifecycle();
 
-  // Kick off the startup re-anchor in parallel with Vite's own startup work.
-  // It writes the sidecar before the first /api/sidecar GET because Vite's
-  // listen() and the browser's first request take longer than this read +
-  // fuzzy match in any realistic case; if the race ever lost, the worst case
-  // is the user sees stale text for ~1 frame, then the sidecar arrives.
-  const reanchorPromise = runStartupReanchor(opts.filePath, sidecarPath);
+  const active = createActiveDocument({
+    initial: opts.initialActive,
+    db: opts.db,
+    session: opts.session,
+    clients: lifecycle.clients,
+    broadcastSse,
+  });
+
+  // Kick off the startup re-anchor in parallel with Vite's startup work.
+  const reanchorPromise = runStartupReanchor(active);
 
   const server = await createServer({
     root: WEB_ROOT,
     server: {
       port: opts.port,
       strictPort: false,
-      // Allow tests / specific environments to pin the bind address. Default
-      // is Vite's normal "loopback on all available families" behavior.
       host: process.env.MARK_IT_HOST,
-      // Pre-fetch the entry so Vite's transform pipeline is hot before the
-      // browser asks for it. Cuts ~150–300ms off first-paint in dev.
       warmup: { clientFiles: ["./main.tsx"] },
     },
     optimizeDeps: {
-      // Tell esbuild up-front what to pre-bundle so the optimizer runs once
-      // at startup instead of being triggered by the first browser request.
       entries: ["main.tsx"],
       include: [
         "react",
@@ -124,22 +144,19 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
         "@mrsf/rehype-mrsf",
         "@mrsf/rehype-mrsf/controller",
       ],
-      // Workspace packages must NOT be pre-bundled — Vite would cache the
-      // bundle and miss subsequent source edits, breaking HMR on cross-
-      // package changes.
       exclude: ["@mark-it/core", "@mark-it/react"],
     },
     plugins: [
-      // Skip plugin's runtime auto-detection — we know the React 19 automatic
-      // runtime is the right answer.
       react({ jsxRuntime: "automatic" }),
-      markItDocumentPlugin(opts.filePath),
-      markItSidecarPlugin(opts.filePath, sidecarPath),
+      markItDocumentPlugin(active),
+      markItSidecarPlugin(active, opts.session ?? null),
       markItEventsPlugin(lifecycle),
-      markItAgentPlugin(opts.filePath, sidecarPath),
+      markItAgentPlugin(active),
+      markItSessionPlugin(active, opts.session ?? null, opts.db),
+      markItTreePlugin(opts.db, opts.session ?? null, active),
     ],
     define: {
-      __MARK_IT_FILE_NAME__: JSON.stringify(basename(opts.filePath)),
+      __MARK_IT_FILE_NAME__: JSON.stringify(basename(opts.initialActive.filePath)),
     },
     clearScreen: false,
   });
@@ -147,57 +164,31 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
   await server.listen();
   const url = server.resolvedUrls?.local[0] ?? `http://localhost:${opts.port}/`;
   server.printUrls();
-  console.error(`mark-it: serving ${opts.filePath}`);
+  console.error(`mark-it: serving ${opts.initialActive.filePath}`);
 
-  // Wait for the startup re-anchor (already in flight) so the watcher arms
-  // against a fresh sidecar; if it lost the race, that's harmless.
   await reanchorPromise;
-
-  // File watcher: re-anchor comments and notify clients on change.
-  const watcher = chokidar.watch(opts.filePath, {
-    persistent: true,
-    ignoreInitial: true,
-    awaitWriteFinish: { stabilityThreshold: 50, pollInterval: 25 },
-  });
-
-  watcher.on("change", async () => {
-    try {
-      if (existsSync(sidecarPath)) {
-        const doc = await parseSidecar(sidecarPath);
-        const content = await readFile(opts.filePath, "utf8");
-        const results = await reanchorDocumentText(doc, content);
-        applyReanchorResults(doc, results);
-        await writeSidecar(sidecarPath, doc);
-      }
-    } catch (err) {
-      console.error("mark-it: re-anchor failed:", err);
-    }
-    broadcastSse(lifecycle.clients, "change");
-  });
 
   if (opts.open) {
     openBrowser(url);
   }
 }
 
-async function runStartupReanchor(
-  filePath: string,
-  sidecarPath: string,
-): Promise<void> {
-  if (!existsSync(sidecarPath)) return;
+async function runStartupReanchor(active: ActiveDocument): Promise<void> {
   try {
-    const doc = await parseSidecar(sidecarPath);
+    const { spec, sidecar } = active.getActive();
+    const doc = await sidecar.load();
     if (!Array.isArray(doc.comments) || doc.comments.length === 0) return;
-    const content = await readFile(filePath, "utf8");
+    if (!existsSync(spec.filePath)) return;
+    const content = await readFile(spec.filePath, "utf8");
     const results = await reanchorDocumentText(doc, content);
     applyReanchorResults(doc, results);
-    await writeSidecar(sidecarPath, doc);
+    await sidecar.save(doc);
   } catch (err) {
     console.error("mark-it: startup re-anchor failed:", err);
   }
 }
 
-function markItDocumentPlugin(filePath: string): Plugin {
+function markItDocumentPlugin(active: ActiveDocument): Plugin {
   return {
     name: "mark-it-document",
     configureServer(server) {
@@ -207,10 +198,11 @@ function markItDocumentPlugin(filePath: string): Plugin {
           return;
         }
         try {
-          const content = await readFile(filePath, "utf8");
+          const { spec } = active.getActive();
+          const content = await readFile(spec.filePath, "utf8");
           json(res, 200, {
-            path: filePath,
-            name: basename(filePath),
+            path: spec.filePath,
+            name: basename(spec.filePath),
             content,
           });
         } catch (err) {
@@ -221,32 +213,25 @@ function markItDocumentPlugin(filePath: string): Plugin {
   };
 }
 
-function markItSidecarPlugin(filePath: string, sidecarPath: string): Plugin {
+function markItSidecarPlugin(active: ActiveDocument, session: Session | null): Plugin {
   return {
     name: "mark-it-sidecar",
     configureServer(server) {
-      const documentRel = relative(process.cwd(), filePath);
-
       async function loadDoc(): Promise<MrsfDocument> {
-        if (!existsSync(sidecarPath)) {
-          return {
-            mrsf_version: "1.0",
-            document: documentRel,
-            comments: [],
-          };
+        const { spec, sidecar } = active.getActive();
+        const doc = await sidecar.load();
+        if (!doc.document) {
+          doc.document = relative(process.cwd(), spec.filePath);
         }
-        const parsed = await parseSidecar(sidecarPath);
-        // YAML "comments:" with no value parses as null — normalize to [].
-        if (!Array.isArray(parsed.comments)) {
-          parsed.comments = [];
-        }
-        return parsed;
+        return doc;
       }
 
       server.middlewares.use("/api/sidecar", async (req, res, next) => {
         if (req.method === "GET") {
           try {
             const doc = await loadDoc();
+            const { spec } = active.getActive();
+            const sidecarPath = `${spec.filePath}.review.yaml`;
             json(res, 200, { doc, sidecarPath });
           } catch (err) {
             json(res, 500, { error: String(err) });
@@ -258,10 +243,22 @@ function markItSidecarPlugin(filePath: string, sidecarPath: string): Plugin {
           try {
             const body = await readJson<{ action: string; payload?: unknown }>(req);
             const doc = await loadDoc();
-            const updated = await applyAction(doc, body.action, body.payload, filePath);
-            await writeSidecar(sidecarPath, updated);
+            const { spec, sidecar } = active.getActive();
+            const updated = await applyAction(
+              doc,
+              body.action,
+              body.payload,
+              spec.filePath,
+              session,
+            );
+            await sidecar.save(updated);
+            const sidecarPath = `${spec.filePath}.review.yaml`;
             json(res, 200, { doc: updated, sidecarPath });
           } catch (err) {
+            if (err instanceof IdentityError) {
+              json(res, 403, { error: err.message });
+              return;
+            }
             json(res, 400, { error: String(err) });
           }
           return;
@@ -273,11 +270,10 @@ function markItSidecarPlugin(filePath: string, sidecarPath: string): Plugin {
   };
 }
 
-/** Wraps each Send chunk so the receiving agent can frame multiple rounds. */
 const SEND_BEGIN = "===MARK-IT-SEND-BEGIN===";
 const SEND_END = "===MARK-IT-SEND-END===";
 
-function markItAgentPlugin(filePath: string, sidecarPath: string): Plugin {
+function markItAgentPlugin(active: ActiveDocument): Plugin {
   return {
     name: "mark-it-agent",
     configureServer(server) {
@@ -292,24 +288,17 @@ function markItAgentPlugin(filePath: string, sidecarPath: string): Plugin {
           const ids = Array.isArray(body.resolveIds) ? body.resolveIds : [];
 
           if (ids.length > 0) {
-            const doc = existsSync(sidecarPath)
-              ? await parseSidecar(sidecarPath)
-              : null;
-            if (doc) {
-              if (!Array.isArray(doc.comments)) doc.comments = [];
-              for (const id of ids) resolveComment(doc, id);
-              await writeSidecar(sidecarPath, doc);
-            }
+            const { sidecar } = active.getActive();
+            const doc = await sidecar.load();
+            if (!Array.isArray(doc.comments)) doc.comments = [];
+            for (const id of ids) resolveComment(doc, id);
+            await sidecar.save(doc);
           }
 
           json(res, 200, { ok: true });
 
           // Stream the chunk to the agent — wrapped in delimiter lines so the
           // receiving side can frame multiple rounds in one mark-it lifetime.
-          // The server stays alive after this; exit is driven by the user
-          // closing the browser tab (see Lifecycle / markItEventsPlugin).
-          // process.stdout.write may return false when the consumer is slow;
-          // for human send rates that's negligible — we don't honor backpressure.
           res.on("finish", () => {
             const inner = text.endsWith("\n") ? text : text + "\n";
             process.stdout.write(`${SEND_BEGIN}\n${inner}${SEND_END}\n`);
@@ -326,8 +315,6 @@ function markItEventsPlugin(lifecycle: Lifecycle): Plugin {
   return {
     name: "mark-it-events",
     configureServer(server) {
-      // Explicit "tab is closing" signal from the browser via sendBeacon on
-      // pagehide. Short-circuits the wait for the SSE close event.
       server.middlewares.use("/api/bye", (req, res, next) => {
         if (req.method !== "POST" && req.method !== "GET") {
           next();
@@ -346,9 +333,6 @@ function markItEventsPlugin(lifecycle: Lifecycle): Plugin {
         lifecycle.clients.add(res);
         lifecycle.onClientConnect();
 
-        // Best-effort cleanup so broadcastSse doesn't keep writing to dead
-        // sockets. The close event isn't reliable enough to drive exit
-        // decisions — that's what /api/bye is for.
         req.on("close", () => {
           lifecycle.clients.delete(res);
         });
@@ -373,10 +357,15 @@ async function applyAction(
   action: string,
   payload: unknown,
   filePath: string,
+  session: Session | null,
 ): Promise<MrsfDocument> {
+  enforceIdentity(session, action, payload);
   switch (action) {
     case "add": {
-      const p = payload as Partial<AddCommentOptions> & { selected_text?: string };
+      const p = payload as Partial<AddCommentOptions> & {
+        selected_text?: string;
+        x_user_id?: string;
+      };
       if (!p?.text || !p.author) throw new Error("add: text and author are required");
       const opts: AddCommentOptions = {
         text: p.text,
@@ -397,10 +386,18 @@ async function applyAction(
         const slice = lines.slice(startIdx, endIdx + 1).join("\n");
         if (slice) last.selected_text = slice;
       }
+      if (last && p.x_user_id) {
+        (last as { x_user_id?: string } & typeof last).x_user_id = p.x_user_id;
+      }
       return doc;
     }
     case "reply": {
-      const p = payload as { parentId?: string; text?: string; author?: string };
+      const p = payload as {
+        parentId?: string;
+        text?: string;
+        author?: string;
+        x_user_id?: string;
+      };
       if (!p?.parentId || !p.text || !p.author) {
         throw new Error("reply: parentId, text, author are required");
       }
@@ -413,14 +410,29 @@ async function applyAction(
         end_line: parent.end_line,
         reply_to: p.parentId,
       });
+      const lastReply = doc.comments[doc.comments.length - 1];
+      if (lastReply && p.x_user_id) {
+        (lastReply as { x_user_id?: string } & typeof lastReply).x_user_id = p.x_user_id;
+      }
       return doc;
     }
     case "edit": {
-      const p = payload as { commentId?: string; text?: string; actor?: string };
+      const p = payload as {
+        commentId?: string;
+        text?: string;
+        actor?: string;
+        x_user_id?: string;
+      };
       if (!p?.commentId || !p.text) {
         throw new Error("edit: commentId and text are required");
       }
       editComment(doc, p.commentId, { text: p.text, actor: p.actor });
+      if (p.x_user_id) {
+        const target = doc.comments.find((c) => c.id === p.commentId);
+        if (target) {
+          (target as { x_user_id?: string } & typeof target).x_user_id = p.x_user_id;
+        }
+      }
       return doc;
     }
     case "resolve": {

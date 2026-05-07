@@ -21,3 +21,10 @@ export { CommentSidebar } from "./CommentSidebar.js";
 export { Toolbar } from "./Toolbar.js";
 export { SplitView, type SplitViewProps } from "./SplitView.js";
 export { buildPipeline, type BuildPipelineOptions } from "./pipeline.js";
+export {
+  TreePane,
+  type TreePaneProps,
+  type TreePayload,
+  type TreeProject,
+  type TreeDocument,
+} from "./TreePane.js";

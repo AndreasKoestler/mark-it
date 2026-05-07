@@ -93,6 +93,11 @@ async function submitDraft(page: Page, text: string) {
   await expect(page.locator('[data-testid="comment-draft"]')).toHaveCount(0);
 }
 
+test("AC0: legacy mode has no tree pane", async ({ page }) => {
+  await gotoApp(page);
+  await expect(page.locator(".mi-tree")).toHaveCount(0);
+});
+
 test("AC1: page loads with collapsed frontmatter (5)", async ({ page }) => {
   await gotoApp(page);
   const summary = page.locator(".mi-frontmatter-summary").first();
@@ -185,8 +190,8 @@ test("AC8: Send all + resolve dispatches via the agent transport with resolveIds
     () => (window as unknown as { __sentPayloads: Array<{ comments: string[]; resolveIds: string[] }> }).__sentPayloads,
   );
   expect(sent).toHaveLength(1);
-  expect(sent[0].comments.length).toBe(2);
-  expect(sent[0].resolveIds.length).toBe(2);
+  expect(sent[0]!.comments.length).toBe(2);
+  expect(sent[0]!.resolveIds.length).toBe(2);
 });
 
 test("AC9: Resolve all without copy clears the sidebar", async ({ page }) => {
