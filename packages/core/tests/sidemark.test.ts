@@ -101,6 +101,23 @@ describe("commentsForRender", () => {
     expect(out.comments[0].selected_text).toBe("hello world");
   });
 
+  it("keeps DOM-captured selected_text when source differs only by inline markdown markers", () => {
+    // The user selected text inside a list item like `- **Human review** — …`.
+    // The DOM-captured selected_text has `**` and the leading `- ` stripped;
+    // without the markdown-aware presence check we'd fall through to the
+    // line-content fallback and project lines [line..end_line] (joined),
+    // over-highlighting adjacent bullets in the rendered view.
+    const source =
+      "- **Human review** — read a doc.\n- **Agent-in-the-loop** — different text.\n";
+    const c = comment({
+      line: 1,
+      end_line: 2,
+      selected_text: "Human review — read a doc.",
+    });
+    const out = commentsForRender(doc([c]), source);
+    expect(out.comments[0].selected_text).toBe("Human review — read a doc.");
+  });
+
   it("joins multi-line ranges with newlines and trims surrounding whitespace", () => {
     const source = "  block start\n  block end\nfooter\n";
     const c = comment({
@@ -136,5 +153,25 @@ describe("isOrphanedAnchor", () => {
   it("returns true when neither selected_text nor anchored_text is in source", () => {
     const c = comment({ selected_text: "ghost text" });
     expect(isOrphanedAnchor(c, "completely different doc")).toBe(true);
+  });
+
+  it("returns false when selected_text matches source modulo inline markdown markers", () => {
+    // Captured from the rendered DOM (no `**` markers), source has them.
+    // A fresh comment with no edits to the document must not be flagged as
+    // orphaned just because the source carries formatting markers the DOM
+    // doesn't.
+    const source =
+      "- **Human review** — read a doc, leave comments, reply, resolve, persist them next to the file.\n";
+    const c = comment({
+      selected_text:
+        "Human review — read a doc, leave comments, reply, resolve, persist them next to the file.",
+    });
+    expect(isOrphanedAnchor(c, source)).toBe(false);
+  });
+
+  it("returns false when selected_text matches source modulo a leading list bullet", () => {
+    const source = "- bullet item content\n";
+    const c = comment({ selected_text: "bullet item content" });
+    expect(isOrphanedAnchor(c, source)).toBe(false);
   });
 });

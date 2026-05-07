@@ -20,6 +20,32 @@ function stripLinePrefix(s: string): string {
 }
 
 /**
+ * Strip inline markdown delimiters (`**`, `__`, `*`, `_`, `~~`, backticks)
+ * from a string. Mirrors `MrsfController.stripInlineMarkdown` so that anchor
+ * checks comparing rendered selected_text against raw source can succeed —
+ * the renderer sees the text without the markers, so naive `source.includes`
+ * would otherwise miss any anchor on a line with inline formatting.
+ */
+function stripInlineMarkdown(s: string): string {
+  return s
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/\*(.+?)\*/g, "$1")
+    .replace(/_(.+?)_/g, "$1")
+    .replace(/~~(.+?)~~/g, "$1");
+}
+
+function anchorPresentInSource(text: string | undefined, source: string): boolean {
+  if (!text) return false;
+  if (source.includes(text)) return true;
+  // selected_text captured from the rendered DOM has its markdown markers
+  // stripped; check against a stripped view of source so a freshly-added
+  // comment on a line like `- **bold** stuff` isn't flagged as orphaned.
+  return stripInlineMarkdown(source).includes(text);
+}
+
+/**
  * Re-anchor-aware projection for renderers. The Sidemark spec keeps
  * `selected_text` immutable, but renderers (e.g. `@mrsf/rehype-mrsf`'s
  * `MrsfController`) search the live document for that exact string — they
@@ -80,12 +106,18 @@ export function commentsForRender(doc: MrsfDocument, source?: string): MrsfDocum
     // matches the rendered DOM — MrsfController's own stripInlineMarkdown
     // handles inline markers (`**`, `_`, …) but not these line-leading
     // prefixes.
+    //
+    // `anchorPresentInSource` lets selected_text captured from the rendered
+    // DOM (markers stripped) match raw source with markers — without that
+    // fallback we'd needlessly substitute a multi-line projection over
+    // `[line, end_line]` and the renderer would highlight more than the
+    // user originally selected.
     if (
       lines != null &&
       source != null &&
       c.selected_text &&
       c.line != null &&
-      !source.includes(c.selected_text)
+      !anchorPresentInSource(c.selected_text, source)
     ) {
       const startIdx = c.line - 1;
       const endIdx = (c.end_line ?? c.line) - 1;
@@ -108,8 +140,8 @@ export function commentsForRender(doc: MrsfDocument, source?: string): MrsfDocum
  */
 export function isOrphanedAnchor(comment: Comment, source: string): boolean {
   const ext = comment as Comment & { anchored_text?: string };
-  if (ext.anchored_text && source.includes(ext.anchored_text)) return false;
-  if (comment.selected_text && source.includes(comment.selected_text)) return false;
+  if (anchorPresentInSource(ext.anchored_text, source)) return false;
+  if (anchorPresentInSource(comment.selected_text, source)) return false;
   return true;
 }
 
