@@ -147,6 +147,73 @@ test("daemon registers two docs, focuses an existing tab on re-register, idle-ex
   }
 });
 
+test("tab close sends `event: done` to attached tail subscribers, then unregisters", async () => {
+  const home = mkdtempSync(join(tmpdir(), "mark-it-bye-done-"));
+  const daemon = spawnDaemon({ MARK_IT_HOME: home }, 0, 30);
+  daemon.stderr?.on("data", (chunk) => process.stderr.write(`[daemon] ${chunk}`));
+
+  try {
+    const info = await waitForDaemonFile(home);
+    const reg = await callJson<{ docId: string }>(info, "/api/registry/register", {
+      method: "POST",
+      body: JSON.stringify({ filePath: FIXTURE_A }),
+    });
+    const docId = reg.body.docId;
+
+    // Subscribe to the agent stream — analogous to `mark-it tail`.
+    const sse = await fetch(
+      `http://127.0.0.1:${info.port}/api/agent/events?doc=${docId}&token=${info.token}`,
+    );
+    const reader = sse.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    const readUntilEvent = async (
+      name: string,
+      timeoutMs = 5_000,
+    ): Promise<void> => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const idx = buf.indexOf("\n\n");
+        if (idx !== -1) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          if (block.includes(`event: ${name}`)) return;
+          continue;
+        }
+        const slice = await Promise.race([
+          reader.read(),
+          new Promise<{ done: true; value: undefined }>((r) =>
+            setTimeout(() => r({ done: true, value: undefined }), Math.max(50, deadline - Date.now())),
+          ),
+        ]);
+        if (slice.done) break;
+        buf += decoder.decode(slice.value, { stream: true });
+      }
+      throw new Error(`event "${name}" not received within ${timeoutMs}ms (got ${JSON.stringify(buf)})`);
+    };
+
+    await readUntilEvent("ready");
+
+    // Browser tab pagehide. Tail subscriber stays attached.
+    await fetch(`http://127.0.0.1:${info.port}/api/bye?doc=${docId}`, {
+      method: "POST",
+      headers: { "X-Mark-It-Token": info.token },
+    });
+
+    // After the grace window, tail must see `event: done` — the daemon's
+    // proactive signal that the review session is over.
+    await readUntilEvent("done", 5_000);
+
+    // And the doc is no longer registered.
+    const after = await callJson<{ docs: Array<{ docId: string }> }>(info, "/api/registry/list");
+    expect(after.body.docs.find((d) => d.docId === docId)).toBeUndefined();
+
+    await reader.cancel();
+  } finally {
+    if (daemon.exitCode == null) daemon.kill("SIGKILL");
+  }
+});
+
 test("/api/bye?doc=<id> auto-unregisters the doc after the grace window", async () => {
   const home = mkdtempSync(join(tmpdir(), "mark-it-bye-"));
   const daemon = spawnDaemon({ MARK_IT_HOME: home }, 0, 30);

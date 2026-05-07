@@ -108,12 +108,27 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
       unregisterTimers.delete(docId);
       const sess = registry.get(docId);
       if (!sess) return;
+      // The browser tab owns the review session. As long as the tab is
+      // attached (lifecycleClients), the doc stays. `mark-it tail`
+      // subscribers are passive observers — when the tab closes we tell
+      // them the review is over and unregister anyway.
       if (sess.lifecycleClients.size > 0) return;
-      if (sess.agentSseClients.size > 0) return;
+      announceDoneTo(sess.agentSseClients);
       await registry.unregister(docId).catch(() => undefined);
     }, byeGraceMs);
     t.unref();
     unregisterTimers.set(docId, t);
+  }
+
+  function announceDoneTo(clients: Set<import("node:http").ServerResponse>) {
+    const payload = "event: done\ndata: {}\n\n";
+    for (const c of clients) {
+      try {
+        c.write(payload);
+      } catch {
+        /* connection already gone */
+      }
+    }
   }
   function cancelUnregister(docId: string) {
     const existing = unregisterTimers.get(docId);
@@ -160,7 +175,9 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
         onDocConnect: cancelUnregister,
         onByeForDoc: scheduleUnregister,
       }),
-      markItAgentStreamPlugin(registry, { onDocConnect: cancelUnregister }),
+      // Tail subscribers don't keep the session alive — only browser tabs do
+      // (events.onDocConnect). Tail learns the session is over via `done`.
+      markItAgentStreamPlugin(registry),
       markItAgentPlugin(registry),
       markItSessionPlugin(registry, null, opts.db),
       markItTreePlugin(opts.db, null, registry),
@@ -183,6 +200,8 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
     console.error(`mark-it daemon: received ${sig}, shutting down`);
     await discovery.clear();
     for (const sess of registry.all()) {
+      announceDoneTo(sess.agentSseClients);
+      announceDoneTo(sess.lifecycleClients);
       try {
         await registry.unregister(sess.docId);
       } catch {
