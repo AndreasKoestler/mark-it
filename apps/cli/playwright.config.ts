@@ -23,7 +23,10 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `bun src/index.ts fixtures/plan.md --no-open --port ${PORT}`,
+    // Use the explicit `review` subcommand so we get the long-running
+    // legacy server. Bare-file `mark-it foo.md` is a thin daemon client
+    // that exits in <1s.
+    command: `bun src/index.ts review fixtures/plan.md --no-open --port ${PORT}`,
     url: BASE_URL,
     reuseExistingServer: false,
     timeout: 30_000,

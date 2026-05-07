@@ -46,9 +46,11 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<numb
 }
 
 function spawnMarkIt(port: number): ChildProcess {
+  // Explicit `review` subcommand → legacy long-running server (the path this
+  // test exercises). Bare-file is now a thin daemon client that exits in <1s.
   const child = spawn(
     "bun",
-    [CLI_ENTRY, FIXTURE_PATH, "--no-open", "--port", String(port)],
+    [CLI_ENTRY, "review", FIXTURE_PATH, "--no-open", "--port", String(port)],
     {
       stdio: ["ignore", "pipe", "pipe"],
       env: {

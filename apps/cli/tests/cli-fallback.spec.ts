@@ -1,12 +1,17 @@
 /**
  * cli-fallback.spec.ts
  *
- * Verifies that invoking `mark-it <file> --no-open --port <p>` (no subcommand)
- * still routes to the `review` command and brings up a working server.
+ * Verifies argv routing:
+ *  - Bare-file `mark-it <file>` (no subcommand) is a thin client that
+ *    spawns/uses the daemon, registers the doc, and exits.
+ *  - Explicit `mark-it review <file> --port N` keeps the legacy long-running
+ *    behaviour for tests and shell pipelines that want it.
  */
 import { test, expect } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { resolve, dirname } from "node:path";
+import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -15,62 +20,68 @@ const FIXTURE = resolve(__dirname, "..", "fixtures", "plan.md");
 
 const FALLBACK_PORT = 5194;
 
-async function waitForServer(
-  url: string,
-  timeoutMs = 20_000,
-): Promise<void> {
+async function waitForServer(url: string, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(url);
       if (res.status < 500) return;
     } catch {
-      // server not up yet
+      /* not up yet */
     }
     await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error(`Server at ${url} did not become ready within ${timeoutMs}ms`);
 }
 
-function spawnMarkIt(
-  args: string[],
-  env?: Record<string, string>,
-): ChildProcess {
+function spawnMarkIt(args: string[], env?: Record<string, string>): ChildProcess {
   return spawn("bun", [CLI, ...args], {
     env: { ...process.env, ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
 
-test("bare file arg (no subcommand) routes to review and boots server", async () => {
-  const child = spawnMarkIt(
-    [FIXTURE, "--no-open", "--port", String(FALLBACK_PORT)],
-    { MARK_IT_NO_AUTO_EXIT: "1" },
-  );
+test("bare file arg (no subcommand) is a thin client: registers via daemon and exits", async () => {
+  const home = mkdtempSync(join(tmpdir(), "mark-it-fb-"));
+  const child = spawnMarkIt([FIXTURE, "--no-open"], { MARK_IT_HOME: home });
+  const stdoutChunks: string[] = [];
+  child.stdout?.on("data", (chunk) => stdoutChunks.push(String(chunk)));
+  child.stderr?.on("data", (chunk) => process.stderr.write(`[mark-it] ${chunk}`));
 
-  const serverUrl = `http://localhost:${FALLBACK_PORT}`;
+  // The thin client should exit on its own within a few seconds.
+  const code = await new Promise<number | null>((resolveCode) => {
+    const timer = setTimeout(() => resolveCode(null), 15_000);
+    child.once("exit", (c) => {
+      clearTimeout(timer);
+      resolveCode(c ?? 0);
+    });
+  });
+  expect(code).toBe(0);
 
-  try {
-    await waitForServer(`${serverUrl}/api/sidecar`);
+  // It should have printed the docId.
+  const stdout = stdoutChunks.join("");
+  expect(stdout).toMatch(/^legacy-[0-9a-f]{16}\n/);
 
-    // Verify /api/sidecar responds with 200 and JSON
-    const sidecarRes = await fetch(`${serverUrl}/api/sidecar`);
-    expect(sidecarRes.status).toBe(200);
-    const sidecar = await sidecarRes.json() as { doc?: { mrsf_version?: string } };
-    expect(sidecar).toHaveProperty("doc");
-    expect(sidecar.doc).toHaveProperty("mrsf_version");
+  // The daemon it spawned should still be running and reachable.
+  const daemonFile = join(home, ".mark-it", "daemon.json");
+  expect(existsSync(daemonFile)).toBe(true);
+  const info = JSON.parse(readFileSync(daemonFile, "utf8")) as {
+    port: number;
+    token: string;
+    pid: number;
+  };
+  const list = await fetch(`http://127.0.0.1:${info.port}/api/registry/list`, {
+    headers: { "X-Mark-It-Token": info.token },
+  });
+  expect(list.status).toBe(200);
+  const body = (await list.json()) as { docs: Array<{ filePath: string }> };
+  expect(body.docs.find((d) => d.filePath === FIXTURE)).toBeTruthy();
 
-    // Verify /api/document responds with the fixture file name
-    const docRes = await fetch(`${serverUrl}/api/document`);
-    expect(docRes.status).toBe(200);
-    const doc = await docRes.json() as { name?: string };
-    expect(doc.name).toBe("plan.md");
-  } finally {
-    child.kill("SIGTERM");
-  }
+  // Tear the daemon down.
+  process.kill(info.pid, "SIGTERM");
 });
 
-test("review subcommand explicit also boots server", async () => {
+test("review subcommand explicit boots a long-running server (legacy mode)", async () => {
   const reviewPort = FALLBACK_PORT + 1;
   const child = spawnMarkIt(
     ["review", FIXTURE, "--no-open", "--port", String(reviewPort)],

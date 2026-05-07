@@ -64,6 +64,10 @@ function createDaemonLifecycle(opts: {
 export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
   const token = randomBytes(32).toString("hex");
   const discovery = createDiscovery();
+  // Pick a random unprivileged port up-front so we don't fight Vite's
+  // 5173-then-retry logic, which is slow when 5173 is held by another
+  // dev server and noisy in test output.
+  const wantPort = opts.port > 0 ? opts.port : await pickFreePort();
 
   const registry = createSessionRegistry({
     broadcast: (docId, event) => {
@@ -90,7 +94,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
   const server = await createServer({
     root: WEB_ROOT,
     server: {
-      port: opts.port,
+      port: wantPort,
       strictPort: false,
       host: opts.host,
       warmup: { clientFiles: ["./main.tsx"] },
@@ -160,6 +164,20 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
     `mark-it daemon: listening on ${origin} (pid ${process.pid}, idle=${opts.idleSecs}s)`,
   );
   lifecycle.start();
+}
+
+async function pickFreePort(): Promise<number> {
+  const { createServer: createNetServer } = await import("node:net");
+  return new Promise((resolveOk, reject) => {
+    const srv = createNetServer();
+    srv.unref();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      srv.close(() => resolveOk(port));
+    });
+  });
 }
 
 function broadcastSseClients(clients: Set<import("node:http").ServerResponse>, event: string): void {

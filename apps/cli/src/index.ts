@@ -5,20 +5,28 @@ import { orgCommand } from "./commands/org.js";
 import { userCommand } from "./commands/user.js";
 import { projectCommand } from "./commands/project.js";
 import { daemonCommand } from "./commands/daemon.js";
+import { openCommand } from "./commands/open.js";
 
-const KNOWN_SUBCOMMANDS = new Set(["review", "org", "user", "project", "daemon"]);
+const KNOWN_SUBCOMMANDS = new Set([
+  "review",
+  "org",
+  "user",
+  "project",
+  "daemon",
+  "open",
+]);
 
 /**
- * Bare-file fallback: `mark-it foo.md --port 5173` should still work.
- * If the first arg isn't a known subcommand, prepend "review" so citty
- * routes accordingly. Hard-coded set avoids surprising behaviour on typos.
+ * Bare-file fallback: `mark-it foo.md` opens via the daemon (thin client).
+ * If the first arg isn't a known subcommand, prepend "open" so citty
+ * routes accordingly.
  */
 function preprocessArgv(argv: string[]): string[] {
   const first = argv[0];
   if (!first) return argv;
   if (first.startsWith("-")) return argv;
   if (KNOWN_SUBCOMMANDS.has(first)) return argv;
-  return ["review", ...argv];
+  return ["open", ...argv];
 }
 
 const main = defineCommand({
@@ -29,6 +37,7 @@ const main = defineCommand({
     user: userCommand,
     project: projectCommand,
     daemon: daemonCommand,
+    open: openCommand,
   },
 });
 
