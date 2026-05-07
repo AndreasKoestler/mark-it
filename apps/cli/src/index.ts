@@ -4,8 +4,9 @@ import { reviewCommand } from "./commands/review.js";
 import { orgCommand } from "./commands/org.js";
 import { userCommand } from "./commands/user.js";
 import { projectCommand } from "./commands/project.js";
+import { daemonCommand } from "./commands/daemon.js";
 
-const KNOWN_SUBCOMMANDS = new Set(["review", "org", "user", "project"]);
+const KNOWN_SUBCOMMANDS = new Set(["review", "org", "user", "project", "daemon"]);
 
 /**
  * Bare-file fallback: `mark-it foo.md --port 5173` should still work.
@@ -27,6 +28,7 @@ const main = defineCommand({
     org: orgCommand,
     user: userCommand,
     project: projectCommand,
+    daemon: daemonCommand,
   },
 });
 

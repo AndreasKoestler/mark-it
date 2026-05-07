@@ -18,7 +18,7 @@ export interface Discovery {
 }
 
 export function createDiscovery(opts: { home?: string } = {}): Discovery {
-  const home = opts.home ?? homedir();
+  const home = opts.home ?? process.env.MARK_IT_HOME ?? homedir();
   const dir = join(home, ".mark-it");
   const file = join(dir, "daemon.json");
   const lock = join(dir, ".daemon.lock");
