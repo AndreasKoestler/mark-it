@@ -1,6 +1,7 @@
 import chokidar, { type FSWatcher } from "chokidar";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { reanchorDocumentText, applyReanchorResults } from "@mrsf/cli";
 import { DbSidecarStore, DiskSidecarStore, type SidecarStore } from "../sidecar/store.js";
 import { docIdForSpec } from "./ids.js";
@@ -97,15 +98,26 @@ export function createSessionRegistry(deps: {
       return inflight;
     }
 
-    const watcher: FSWatcher = chokidar.watch(spec.filePath, {
+    // Watch the parent directory rather than the file itself. macOS fsevents
+    // (and most editors using atomic write = rename(tmp, target)) silently
+    // breaks single-file watches: the inode chokidar held a reference to is
+    // gone, and `change` events stop firing forever. Watching the parent
+    // dir + filtering by path survives every editor's save strategy.
+    const watcher: FSWatcher = chokidar.watch(dirname(spec.filePath), {
       persistent: true,
       ignoreInitial: true,
+      depth: 0,
       awaitWriteFinish: { stabilityThreshold: 50, pollInterval: 25 },
     });
-    watcher.on("change", async () => {
+    async function onFileChange(changedPath: string) {
+      if (changedPath !== spec.filePath) return;
       await ensureFreshAnchors();
       deps.broadcast(docId, "change");
-    });
+    }
+    watcher.on("change", onFileChange);
+    // `add` fires after rename(tmp, target) atomic writes — same effect as
+    // `change` for our purposes (the file content updated).
+    watcher.on("add", onFileChange);
 
     return {
       docId,

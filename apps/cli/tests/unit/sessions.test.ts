@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSessionRegistry } from "../../src/daemon/sessions.js";
@@ -59,4 +59,48 @@ comments:
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("watcher fires on atomic rename writes (vim/Edit-tool save pattern)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mark-it-watcher-"));
+    try {
+      const file = join(dir, "doc.md");
+      await writeFile(file, "v0\n", "utf8");
+
+      const events: string[] = [];
+      const reg = createSessionRegistry({
+        broadcast: (_docId, event) => events.push(event),
+      });
+      const sess = reg.register({ filePath: file });
+      try {
+        // Several atomic-rename writes in a row — modern editors (and our
+        // own Edit tool) save by writing to a tempfile and then renaming
+        // it over the target. Single-file chokidar watches lose the inode
+        // and stop firing after the first such write; watching the parent
+        // dir survives any number.
+        for (const v of ["v1", "v2", "v3", "v4"]) {
+          const tmp = `${file}.tmp`;
+          await writeFile(tmp, `${v}\n`, "utf8");
+          await rename(tmp, file);
+          await waitFor(() => events.length > 0, 2_000);
+          events.length = 0;
+        }
+      } finally {
+        await reg.unregister(sess.docId);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`waitFor: predicate not satisfied within ${timeoutMs}ms`);
+}
