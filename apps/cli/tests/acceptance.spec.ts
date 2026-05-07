@@ -41,6 +41,33 @@ async function stubClipboard(page: Page) {
   });
 }
 
+/**
+ * Install a stub AgentTransport so "Send" actions don't hit /api/agent
+ * (which would exit the CLI process and tear down the dev server mid-suite).
+ * The stub records each formatForAgent payload on `window.__sentPayloads`.
+ */
+async function stubAgentTransport(page: Page) {
+  await page.addInitScript(() => {
+    const sent: Array<{ comments: string[]; resolveIds: string[] }> = [];
+    (window as unknown as { __sentPayloads: typeof sent }).__sentPayloads = sent;
+    (window as unknown as { __markItTestTransports: unknown }).__markItTestTransports =
+      [
+        {
+          name: "test-stub",
+          async send(payload: {
+            comments: Array<{ id: string }>;
+            resolveIds?: string[];
+          }) {
+            sent.push({
+              comments: payload.comments.map((c) => c.id),
+              resolveIds: payload.resolveIds ?? [],
+            });
+          },
+        },
+      ];
+  });
+}
+
 async function readCaptured(page: Page): Promise<string[]> {
   return await page.evaluate(() => (window as unknown as { __captured: string[] }).__captured);
 }
@@ -144,8 +171,8 @@ test("AC7: Copy 1 for Agent puts the formatted prompt on clipboard", async ({ pa
   expect(captured[0]).toContain("Clip 1");
 });
 
-test("AC8: Send all + resolve copies all and flips resolved", async ({ page }) => {
-  await stubClipboard(page);
+test("AC8: Send all + resolve dispatches via the agent transport with resolveIds", async ({ page }) => {
+  await stubAgentTransport(page);
   await gotoApp(page);
   await dispatchAdd(page, 17);
   await submitDraft(page, "First");
@@ -154,13 +181,12 @@ test("AC8: Send all + resolve copies all and flips resolved", async ({ page }) =
   await page.locator('[data-testid="agent-menu-toggle"]').click();
   await page.locator('[data-testid="agent-send-all-resolve"]').click();
   await page.waitForTimeout(500);
-  await expect(page.locator('[data-testid="thread"]')).toHaveCount(0);
-  const captured = await readCaptured(page);
-  const last = captured[captured.length - 1] ?? "";
-  expect(last).toContain("First");
-  expect(last).toContain("Second");
-  const yaml = readFileSync(SIDECAR_PATH, "utf8");
-  expect(yaml.match(/resolved: true/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+  const sent = await page.evaluate(
+    () => (window as unknown as { __sentPayloads: Array<{ comments: string[]; resolveIds: string[] }> }).__sentPayloads,
+  );
+  expect(sent).toHaveLength(1);
+  expect(sent[0].comments.length).toBe(2);
+  expect(sent[0].resolveIds.length).toBe(2);
 });
 
 test("AC9: Resolve all without copy clears the sidebar", async ({ page }) => {
@@ -172,6 +198,92 @@ test("AC9: Resolve all without copy clears the sidebar", async ({ page }) => {
   await page.locator('[data-testid="agent-menu-toggle"]').click();
   await page.locator('[data-testid="agent-resolve-all"]').click();
   await expect(page.locator('[data-testid="thread"]')).toHaveCount(0);
+});
+
+test("AC12: drift — text edit re-anchors via fuzzy match and shows drift badge", async ({ page }) => {
+  await gotoApp(page);
+  await dispatchAdd(page, 17);
+  await submitDraft(page, "Mention scaffolding work.");
+  // No drift before any edit.
+  await expect(page.locator('[data-testid="thread-drift-badge"]')).toHaveCount(0);
+  // Modify the anchored line in-place — same line index, slightly different
+  // wording so the immutable selected_text no longer matches verbatim. Fuzzy
+  // matching should still re-anchor (>0.8) and surface as drift.
+  const original = readFileSync(FIXTURE_PATH, "utf8");
+  const edited = original.replace(
+    "Empty repository ready for scaffolding",
+    "Empty repo, ready for scaffolds and tests",
+  );
+  expect(edited).not.toBe(original);
+  writeFileSync(FIXTURE_PATH, edited, "utf8");
+  // SSE-driven re-anchor: drift badge appears and the new anchor text shows.
+  const badge = page.locator('[data-testid="thread-drift-badge"]');
+  await expect(badge).toBeVisible({ timeout: 5_000 });
+  await expect(badge).toHaveText(/drifted|anchor lost/i);
+  // Fuzzy match returns a slice of the new line; full wording isn't guaranteed.
+  // What matters is that the "now anchors to" block points at the edited text.
+  const anchorNow = page.locator('[data-testid="thread-anchor-now"]');
+  await expect(anchorNow).toContainText(/Empty repo/);
+  await expect(anchorNow).not.toContainText(/Empty repository ready for scaffolding/);
+  // Sidecar persists the re-anchor metadata.
+  const yaml = readFileSync(SIDECAR_PATH, "utf8");
+  expect(yaml).toMatch(/x_reanchor_status:/);
+});
+
+test("AC11: Send raises a top-right toast that auto-dismisses", async ({ page }) => {
+  await stubAgentTransport(page);
+  await gotoApp(page);
+  await dispatchAdd(page, 17);
+  await submitDraft(page, "Anything");
+  await expect(page.locator('[data-testid="sent-toast"]')).toHaveCount(0);
+  await page.locator('[data-testid="agent-menu-toggle"]').click();
+  await page.locator('[data-testid="agent-send-all"]').click();
+  const toast = page.locator('[data-testid="sent-toast"]');
+  await expect(toast).toBeVisible();
+  await expect(toast).toContainText(/agent is processing/i);
+  // Auto-dismisses after ~4s; allow a generous timeout.
+  await expect(toast).toHaveCount(0, { timeout: 6_000 });
+});
+
+test("AC13: Send to /api/agent keeps the server alive (long-running mode)", async ({ page }) => {
+  // No stub transport here — drive the real HttpAgentTransport which POSTs
+  // /api/agent. Pre-mark-it the server would process.exit(0) on this call;
+  // post-change it must keep serving and resolveIds must persist.
+  await gotoApp(page);
+  await dispatchAdd(page, 17);
+  await submitDraft(page, "Long-running send");
+
+  // Read the comment id we just added.
+  const commentId = await page
+    .locator('[data-testid="thread"]')
+    .first()
+    .getAttribute("data-comment-id");
+  expect(commentId).toBeTruthy();
+
+  // Hit /api/agent directly with a resolveIds payload that should persist.
+  const sendStatus = await page.evaluate(async (id) => {
+    const res = await fetch("/api/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "Document: plan.md\n\nComment 1 (line 17)",
+        resolveIds: [id],
+      }),
+    });
+    return res.status;
+  }, commentId);
+  expect(sendStatus).toBe(200);
+
+  // Server still up: the next sidecar GET succeeds and shows the comment
+  // resolved.
+  const sidecar = await page.evaluate(async () => {
+    const res = await fetch("/api/sidecar");
+    return res.ok ? await res.json() : null;
+  });
+  expect(sidecar).not.toBeNull();
+  const comments = sidecar.doc.comments as Array<{ id: string; resolved: boolean }>;
+  const target = comments.find((c) => c.id === commentId);
+  expect(target?.resolved).toBe(true);
 });
 
 test("AC10: drift — appending lines re-anchors comment line", async ({ page }) => {

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, type ReactElement } from "react";
 import { MrsfController } from "@mrsf/rehype-mrsf/controller";
+import { commentsForRender } from "@mark-it/core";
 import { useMarkIt, useMarkItState } from "./MarkItProvider.js";
 import { buildPipeline } from "./pipeline.js";
 
@@ -10,7 +11,7 @@ export function RenderedView() {
 
   const tree = useMemo<ReactElement>(() => {
     const proc = buildPipeline({
-      comments: doc,
+      comments: commentsForRender(doc, source),
       documentPath,
       interactive: true,
     });

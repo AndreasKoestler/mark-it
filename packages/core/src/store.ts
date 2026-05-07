@@ -1,4 +1,4 @@
-import type { MrsfDocument } from "@mrsf/cli";
+import type { MrsfDocument } from "@mrsf/cli/browser";
 
 export interface DraftAnchor {
   line: number;
@@ -9,6 +9,8 @@ export interface DraftAnchor {
 export interface MarkItState {
   doc: MrsfDocument;
   draft: DraftAnchor | null;
+  /** Comment id currently being edited inline in the sidebar, or null. */
+  editingId: string | null;
   /** Monotonic counter bumped on every doc update — useful for memo keys. */
   revision: number;
 }
@@ -42,7 +44,7 @@ export function createStore<T>(initial: T): Store<T> {
 }
 
 export function createMarkItStore(doc: MrsfDocument): Store<MarkItState> {
-  return createStore<MarkItState>({ doc, draft: null, revision: 0 });
+  return createStore<MarkItState>({ doc, draft: null, editingId: null, revision: 0 });
 }
 
 export function setDoc(state: MarkItState, doc: MrsfDocument): MarkItState {
@@ -55,4 +57,12 @@ export function openDraft(state: MarkItState, anchor: DraftAnchor): MarkItState 
 
 export function closeDraft(state: MarkItState): MarkItState {
   return { ...state, draft: null };
+}
+
+export function openEdit(state: MarkItState, commentId: string): MarkItState {
+  return { ...state, editingId: commentId };
+}
+
+export function closeEdit(state: MarkItState): MarkItState {
+  return { ...state, editingId: null };
 }

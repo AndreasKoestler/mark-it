@@ -9,6 +9,7 @@ export {
   type MarkItProviderProps,
   type CommentApi,
   type CommentAddInput,
+  type CommentEditInput,
   type CommentReplyInput,
   type ViewMode,
 } from "./MarkItProvider.js";
@@ -18,4 +19,5 @@ export { ViewToggle } from "./ViewToggle.js";
 export { Document } from "./Document.js";
 export { CommentSidebar } from "./CommentSidebar.js";
 export { Toolbar } from "./Toolbar.js";
+export { SplitView, type SplitViewProps } from "./SplitView.js";
 export { buildPipeline, type BuildPipelineOptions } from "./pipeline.js";

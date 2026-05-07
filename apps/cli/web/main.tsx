@@ -5,13 +5,15 @@ import {
   Document,
   Toolbar,
   CommentSidebar,
+  SplitView,
   type CommentApi,
   type CommentAddInput,
+  type CommentEditInput,
   type CommentReplyInput,
 } from "@mark-it/react";
 import "@mark-it/react/theme.css";
 import "@mrsf/rehype-mrsf/style.css";
-import { ClipboardTransport, type MrsfDocument } from "@mark-it/core";
+import { HttpAgentTransport, type AgentTransport, type MrsfDocument } from "@mark-it/core";
 
 declare const __MARK_IT_FILE_NAME__: string;
 
@@ -64,22 +66,41 @@ function App() {
     es.addEventListener("change", () => {
       refresh().catch((e) => setError(String(e)));
     });
+    // Tell the server we're leaving as soon as the tab is closing. pagehide
+    // fires for normal closes, navigation, and bfcache evictions; sendBeacon
+    // is queued by the browser even during unload, so the server gets the
+    // signal even though the page is gone.
+    const bye = () => {
+      navigator.sendBeacon("/api/bye");
+    };
+    window.addEventListener("pagehide", bye);
     return () => {
       cancelled = true;
       es.close();
+      window.removeEventListener("pagehide", bye);
     };
   }, []);
 
   const commentApi = useMemo<CommentApi>(() => ({
     add: (input: CommentAddInput) => postSidecar("add", input),
     reply: (input: CommentReplyInput) => postSidecar("reply", input),
+    edit: (input: CommentEditInput) => postSidecar("edit", input),
     resolve: (commentId: string) => postSidecar("resolve", { commentId }),
     unresolve: (commentId: string) => postSidecar("unresolve", { commentId }),
-    delete: (commentId: string) => postSidecar("delete", { commentId }),
+    delete: (commentId: string, opts?: { cascade?: boolean }) =>
+      postSidecar("delete", { commentId, cascade: opts?.cascade ?? false }),
     resolveAll: () => postSidecar("resolveAll", {}),
   }), []);
 
-  const transports = useMemo(() => [new ClipboardTransport()], []);
+  const transports = useMemo<ReadonlyArray<AgentTransport>>(() => {
+    // Test harness escape hatch: Playwright may install its own transport via
+    // `window.__markItTestTransports` to avoid the server-exit behavior.
+    const stub = (window as unknown as {
+      __markItTestTransports?: ReadonlyArray<AgentTransport>;
+    }).__markItTestTransports;
+    if (Array.isArray(stub) && stub.length > 0) return stub;
+    return [new HttpAgentTransport({ url: "/api/agent" })];
+  }, []);
 
   if (error) {
     return (
@@ -108,10 +129,7 @@ function App() {
         transports={transports}
       >
         <Toolbar />
-        <section className="mi-content">
-          <Document />
-          <CommentSidebar />
-        </section>
+        <SplitView left={<Document />} right={<CommentSidebar />} />
       </MarkItProvider>
     </div>
   );

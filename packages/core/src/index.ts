@@ -8,6 +8,10 @@ export {
 
 export {
   emptyDocument,
+  commentsForRender,
+  isOrphanedAnchor,
+  PERFECT_SCORE,
+  MRSF_HIGH_THRESHOLD,
   type MrsfDocument,
   type Comment,
 } from "./sidemark.js";
@@ -18,6 +22,8 @@ export {
   setDoc,
   openDraft,
   closeDraft,
+  openEdit,
+  closeEdit,
   type DraftAnchor,
   type MarkItState,
   type Store,
@@ -27,7 +33,9 @@ export {
 export {
   formatForAgent,
   ClipboardTransport,
+  HttpAgentTransport,
   type ClipboardTransportOptions,
+  type HttpAgentTransportOptions,
   type AgentPayload,
   type AgentTransport,
 } from "./agent/index.js";

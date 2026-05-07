@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  formatForAgent,
-  type AgentPayload,
-  type Comment,
-} from "@mark-it/core";
+import { formatForAgent, type AgentPayload, type Comment } from "@mark-it/core";
 import { useMarkIt, useMarkItState, useStoreActions } from "./MarkItProvider.js";
 import { ViewToggle } from "./ViewToggle.js";
 
@@ -12,9 +8,10 @@ export function Toolbar() {
   const { doc } = useMarkItState();
   const actions = useStoreActions();
 
+  const comments = doc.comments ?? [];
   const unresolved = useMemo(
-    () => doc.comments.filter((c) => !c.resolved),
-    [doc.comments],
+    () => comments.filter((c) => !c.resolved),
+    [comments],
   );
   const unresolvedRoots = useMemo(
     () => unresolved.filter((c) => !c.reply_to),
@@ -24,20 +21,35 @@ export function Toolbar() {
   const sendTransport = transports[0];
   const [busy, setBusy] = useState(false);
 
-  const send = async (subset: Comment[], opts: { resolveAfter?: boolean; intent: AgentPayload["intent"] }) => {
+  const buildPayload = (
+    intent: AgentPayload["intent"],
+    comments: Comment[],
+    resolveAfter: boolean,
+  ): AgentPayload => ({
+    document: { path: documentName, content: source },
+    comments,
+    intent,
+    resolveIds: resolveAfter ? comments.map((c) => c.id) : [],
+  });
+
+  const sendForAgent = async (
+    subset: Comment[],
+    opts: { intent: AgentPayload["intent"]; resolveAfter?: boolean },
+  ) => {
     if (!sendTransport || subset.length === 0) return;
     setBusy(true);
     try {
-      await sendTransport.send({
-        document: { path: documentName, content: source },
-        comments: subset,
-        intent: opts.intent,
-      });
-      if (opts.resolveAfter) {
-        await actions.resolveAll();
-      }
+      await sendTransport.send(buildPayload(opts.intent, subset, !!opts.resolveAfter));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const copyForAgent = async (subset: Comment[]) => {
+    if (subset.length === 0) return;
+    const text = formatForAgent(buildPayload("single", subset, false));
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
     }
   };
 
@@ -63,12 +75,23 @@ export function Toolbar() {
       >
         ⧉
       </button>
+      <button
+        type="button"
+        className="mi-toolbar-btn mi-toolbar-comments"
+        data-testid="toolbar-comments-count"
+        title={`${unresolvedRoots.length} open comment${unresolvedRoots.length === 1 ? "" : "s"}`}
+      >
+        <span aria-hidden="true">💬</span>
+        <span className="mi-toolbar-badge" data-testid="toolbar-comments-badge">
+          {unresolvedRoots.length}
+        </span>
+      </button>
       <AgentMenu
         disabled={busy || !sendTransport}
         unresolvedCount={unresolvedRoots.length}
-        onCopyOne={() => send(firstThread(unresolved), { intent: "single" })}
-        onSendAll={() => send(unresolved, { intent: "all" })}
-        onSendAllAndResolve={() => send(unresolved, { intent: "all", resolveAfter: true })}
+        onCopyOne={() => copyForAgent(firstThread(unresolved))}
+        onSendAll={() => sendForAgent(unresolved, { intent: "all" })}
+        onSendAllAndResolve={() => sendForAgent(unresolved, { intent: "all", resolveAfter: true })}
         onResolveAll={() => actions.resolveAll()}
       />
     </header>
@@ -186,5 +209,3 @@ function AgentMenu({
   );
 }
 
-// Re-export so consumers can format payloads themselves if they want.
-export { formatForAgent };

@@ -26,5 +26,10 @@ export default defineConfig({
     url: BASE_URL,
     reuseExistingServer: false,
     timeout: 30_000,
+    // The shared webServer is reused across tests; between tests the page is
+    // closed and re-opened, leaving the SSE channel briefly empty. Disable
+    // auto-exit-on-idle so it doesn't kill itself mid-suite. AC14 spawns its
+    // own mark-it without this flag to verify the production behavior.
+    env: { MARK_IT_NO_AUTO_EXIT: "1" },
   },
 });

@@ -7,6 +7,12 @@ export interface AgentPayload {
   comments: Comment[];
   /** "single" if the user picked one thread; "all" if it's a bulk action. */
   intent: "single" | "all";
+  /**
+   * Comment ids that should be marked resolved atomically with the send.
+   * Transports that talk to a backend can hand this off so the resolve and
+   * the dispatch happen together (no client-side race).
+   */
+  resolveIds?: string[];
 }
 
 export interface AgentTransport {

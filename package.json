@@ -12,7 +12,7 @@
     "build": "bun run --filter '@mark-it/*' build",
     "typecheck": "tsc -b",
     "test": "bun run --filter '@mark-it/*' test",
-    "test:e2e": "bun --cwd apps/cli run test:e2e"
+    "test:e2e": "cd apps/cli && bun run test:e2e"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
