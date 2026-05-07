@@ -56,7 +56,7 @@
 | 8 | Per-doc ring buffer of 100 events, dropped on doc unregister | Bounded memory, sufficient for human-paced review loops |
 | 9 | Skill + shell pipelines consume agent stream via new `mark-it tail <path>` (JSONL on stdout) | Keeps "one process the agent watches" UX; cleanly testable |
 | 10 | Stdout `===MARK-IT-SEND-…===` envelope is removed in this same plan, no deprecation window | The skill ships in-repo; no external consumers documented |
-| 11 | `mark-it tail` consumes SSE via Bun's built-in `EventSource` (no npm dep); server emits SSE inline (no library). Auth for the SSE channel rides on `?token=` because `EventSource` per spec can't set custom request headers | Bun ≥ 1.1 ships a spec-compliant `EventSource` — automatic reconnect + `Last-Event-ID` for free. Server emission is ~10 lines (we already do it for `/api/events`); wrappers like `better-sse` don't earn their weight at our scale |
+| 11 | `mark-it tail` consumes SSE with `fetch` + a small inline parser (Bun 1.3 does **not** expose `EventSource` on `globalThis`, despite some docs implying it does). Server emits SSE inline — no library either side. Auth rides on `?token=` because tail can't carry headers on a transparent reconnect when `EventSource` does land | Hand-rolled parser is ~40 lines and gives us full control over the reconnect loop + Last-Event-ID handling. Server emission is ~10 lines (we already do it for `/api/events`); wrappers like `better-sse` don't earn their weight at our scale |
 
 The user can override any of these during the mark-it review of this plan.
 
