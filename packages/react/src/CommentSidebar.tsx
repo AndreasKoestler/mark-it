@@ -357,12 +357,15 @@ function driftInfo(comment: Comment, source: string): DriftInfo {
 
   const lowScore = score != null && score < MRSF_HIGH_THRESHOLD;
   if (status === "orphaned" || looksOrphaned || lowScore) {
+    // If MRSF still gave us a best-effort anchor, surface it. The badge says
+    // "anchor lost" (low confidence), the "now anchors to" block shows MRSF's
+    // closest match — those are orthogonal pieces of information.
     return {
       kind: "orphaned",
       badge: "anchor lost",
       title:
         "The comment's original text is no longer in the document; the highlight points at the recorded line.",
-      anchoredText: null,
+      anchoredText,
     };
   }
 
