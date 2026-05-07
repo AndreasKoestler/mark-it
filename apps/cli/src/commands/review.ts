@@ -1,8 +1,10 @@
 import { defineCommand } from "citty";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { startServer } from "../server.js";
+import { openDbForCommand, requireOrg, normaliseHandle } from "./util.js";
+import { findUserByHandle, upsertProject, upsertDocument } from "../db/queries.js";
 
 export const reviewCommand = defineCommand({
   meta: { name: "review", description: "Open a Markdown file in mark-it's review UI." },
@@ -33,11 +35,42 @@ export const reviewCommand = defineCommand({
     const port = Number(args.port) || 5173;
     const open = !args["no-open"];
 
-    if (args.org && args.project && args.user) {
-      console.error("mark-it: --org/--project/--user wired in Phase 3; running legacy mode for now.");
+    const dbBacked = args.org && args.project && args.user;
+    if (!dbBacked) {
+      await startServer({ port, open, initialActive: { filePath } });
+      return;
     }
 
-    await startServer({ filePath, port, open });
+    const { db } = openDbForCommand({ db: args.db });
+    const org = requireOrg(db, args.org!);
+    const handle = normaliseHandle(args.user!);
+    const user = findUserByHandle(db, org.id, handle);
+    if (!user) {
+      console.error(`mark-it: user ${handle} is not a member of org ${org.name}`);
+      process.exit(1);
+    }
+    const project = upsertProject(db, org.id, args.project!);
+    const docName = args["doc-name"] ?? basename(filePath);
+    const document = upsertDocument(db, project.id, filePath, docName);
+
+    await startServer({
+      port,
+      open,
+      db,
+      session: {
+        orgId: org.id,
+        orgName: org.name,
+        userId: user.id,
+        userHandle: user.handle,
+      },
+      initialActive: {
+        filePath,
+        documentId: document.id,
+        documentName: document.name,
+        projectId: project.id,
+        projectName: project.name,
+      },
+    });
   },
 });
 

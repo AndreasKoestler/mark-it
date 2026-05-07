@@ -26,7 +26,20 @@ interface SidecarPayload {
   sidecarPath: string;
 }
 
-const AUTHOR = "Andreas Koestler (andreas@example.com)";
+interface SessionPayload {
+  legacy?: boolean;
+  org?: { id: string; name: string };
+  user?: { id: string; handle: string };
+  active: {
+    documentId?: string;
+    documentName?: string;
+    projectId?: string;
+    projectName?: string;
+    filePath: string;
+  };
+}
+
+const LEGACY_AUTHOR = "Andreas Koestler (andreas@example.com)";
 
 async function postSidecar(action: string, payload: unknown): Promise<MrsfDocument> {
   const res = await fetch("/api/sidecar", {
@@ -45,18 +58,21 @@ async function postSidecar(action: string, payload: unknown): Promise<MrsfDocume
 function App() {
   const [docPayload, setDocPayload] = useState<DocumentPayload | null>(null);
   const [sidecar, setSidecar] = useState<MrsfDocument | null>(null);
+  const [session, setSession] = useState<SessionPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     async function refresh() {
-      const [doc, sc] = await Promise.all([
+      const [doc, sc, ss] = await Promise.all([
         fetch("/api/document").then((r) => r.json() as Promise<DocumentPayload>),
         fetch("/api/sidecar").then((r) => r.json() as Promise<SidecarPayload>),
+        fetch("/api/session").then((r) => r.json() as Promise<SessionPayload>),
       ]);
       if (cancelled) return;
       setDocPayload(doc);
       setSidecar(sc.doc);
+      setSession(ss);
     }
     refresh().catch((e) => setError(String(e)));
 
@@ -96,13 +112,17 @@ function App() {
     );
   }
 
+  const author = session?.user?.handle ?? LEGACY_AUTHOR;
+  const userId = session?.user?.id ?? null;
+
   return (
     <div className="mi-root">
       <MarkItProvider
         source={docPayload.content}
         documentPath={docPayload.path}
         documentName={docPayload.name}
-        author={AUTHOR}
+        author={author}
+        userId={userId}
         doc={sidecar}
         commentApi={commentApi}
         transports={transports}
