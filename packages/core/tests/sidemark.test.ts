@@ -30,6 +30,30 @@ describe("commentsForRender", () => {
     expect(out.comments[0].selected_text).toBe("new text");
   });
 
+  it("strips line-prefix and inline markers when projecting anchored_text on drift", () => {
+    // Exactly the production case: user edited a bold list item; MRSF wrote
+    // the new line-with-markers as anchored_text. The renderer's MrsfController
+    // searches the rendered DOM (markers stripped), so the projection has to
+    // match what the DOM actually contains — not the raw source line.
+    const source =
+      "- **Human review** — read a doc, leave comments, reply, resolve, persist them next to the file.\n";
+    const c = comment({
+      line: 1,
+      end_line: 1,
+      selected_text: "Solo human review — read a doc, leave comments, reply, resolve, persist them next to the file.",
+      ...({
+        anchored_text:
+          "- **Human review** — read a doc, leave comments, reply, resolve, persist them next to the file.",
+        x_reanchor_status: "fuzzy",
+        x_reanchor_score: 0.96,
+      } as object),
+    });
+    const out = commentsForRender(doc([c]), source);
+    expect(out.comments[0].selected_text).toBe(
+      "Human review — read a doc, leave comments, reply, resolve, persist them next to the file.",
+    );
+  });
+
   it("keeps selected_text when the score indicates a content-perfect fuzzy match", () => {
     // Reproduces the formatting-only case: rendered selection vs. source-
     // format anchored_text, MRSF scored 1.0 — not real drift. The source IS

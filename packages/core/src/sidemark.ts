@@ -92,8 +92,14 @@ export function commentsForRender(doc: MrsfDocument, source?: string): MrsfDocum
         // matches the rendered DOM 1:1 — keep it.
         if (isContentPerfect) return c;
         // Real drift: project anchored so the renderer searches for the
-        // closest live match.
-        return { ...c, selected_text: anchored };
+        // closest live match. Strip line-prefix and inline markdown so the
+        // projection matches the rendered DOM — MrsfController locates
+        // highlights in the rendered text, not the raw source. Without
+        // stripping, an anchored_text like "- **Human review** — …" never
+        // matches the DOM "Human review — …" and the controller falls back
+        // to inserting both texts inline.
+        const cleaned = stripInlineMarkdown(stripLinePrefix(anchored));
+        return { ...c, selected_text: cleaned };
       }
       // Stale anchored_text — fall through to the orphan substitution
       // below using the recorded line's current content.
