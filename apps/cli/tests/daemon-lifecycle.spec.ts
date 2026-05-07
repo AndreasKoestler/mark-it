@@ -24,7 +24,10 @@ function spawnDaemon(env: Record<string, string>, port = 0, idleSecs = 1): Child
   return spawn(
     "bun",
     [CLI, "daemon", "--port", String(port), "--host", "127.0.0.1", "--idle-secs", String(idleSecs)],
-    { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] },
+    {
+      env: { ...process.env, MARK_IT_BYE_GRACE_MS: "300", ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
   );
 }
 
@@ -139,6 +142,76 @@ test("daemon registers two docs, focuses an existing tab on re-register, idle-ex
 
     // discovery file removed.
     expect(existsSync(join(home, ".mark-it", "daemon.json"))).toBe(false);
+  } finally {
+    if (daemon.exitCode == null) daemon.kill("SIGKILL");
+  }
+});
+
+test("/api/bye?doc=<id> auto-unregisters the doc after the grace window", async () => {
+  const home = mkdtempSync(join(tmpdir(), "mark-it-bye-"));
+  const daemon = spawnDaemon({ MARK_IT_HOME: home }, 0, 30);
+  daemon.stderr?.on("data", (chunk) => process.stderr.write(`[daemon] ${chunk}`));
+
+  try {
+    const info = await waitForDaemonFile(home);
+    const reg = await callJson<{ docId: string }>(info, "/api/registry/register", {
+      method: "POST",
+      body: JSON.stringify({ filePath: FIXTURE_A }),
+    });
+    const docId = reg.body.docId;
+
+    // Sanity: doc is registered.
+    const before = await callJson<{ docs: Array<{ docId: string }> }>(info, "/api/registry/list");
+    expect(before.body.docs.find((d) => d.docId === docId)).toBeTruthy();
+
+    // Browser tab pagehide → /api/bye?doc=<id> with no SSE clients attached.
+    const bye = await fetch(`http://127.0.0.1:${info.port}/api/bye?doc=${docId}`, {
+      method: "POST",
+      headers: { "X-Mark-It-Token": info.token },
+    });
+    expect(bye.ok).toBe(true);
+
+    // Wait past the grace window (300ms set via MARK_IT_BYE_GRACE_MS).
+    await new Promise((r) => setTimeout(r, 800));
+
+    const after = await callJson<{ docs: Array<{ docId: string }> }>(info, "/api/registry/list");
+    expect(after.body.docs.find((d) => d.docId === docId)).toBeUndefined();
+  } finally {
+    if (daemon.exitCode == null) daemon.kill("SIGKILL");
+  }
+});
+
+test("/api/bye is cancelled by a fresh SSE connect (refresh case)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "mark-it-bye2-"));
+  const daemon = spawnDaemon({ MARK_IT_HOME: home }, 0, 30);
+  daemon.stderr?.on("data", (chunk) => process.stderr.write(`[daemon] ${chunk}`));
+
+  try {
+    const info = await waitForDaemonFile(home);
+    const reg = await callJson<{ docId: string }>(info, "/api/registry/register", {
+      method: "POST",
+      body: JSON.stringify({ filePath: FIXTURE_A }),
+    });
+    const docId = reg.body.docId;
+
+    // Beacon, then within the grace window the refreshed tab reconnects.
+    await fetch(`http://127.0.0.1:${info.port}/api/bye?doc=${docId}`, {
+      method: "POST",
+      headers: { "X-Mark-It-Token": info.token },
+    });
+    const sseRes = await fetch(
+      `http://127.0.0.1:${info.port}/api/events?doc=${docId}&token=${info.token}`,
+    );
+    expect(sseRes.ok).toBe(true);
+
+    // Wait well past the grace window.
+    await new Promise((r) => setTimeout(r, 800));
+
+    const after = await callJson<{ docs: Array<{ docId: string }> }>(info, "/api/registry/list");
+    expect(after.body.docs.find((d) => d.docId === docId)).toBeTruthy();
+
+    // Cleanup: cancel the SSE so the daemon can be killed.
+    await sseRes.body?.cancel();
   } finally {
     if (daemon.exitCode == null) daemon.kill("SIGKILL");
   }

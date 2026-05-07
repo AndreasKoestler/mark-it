@@ -92,6 +92,37 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
     },
   });
 
+  // Per-doc unregister scheduling: a browser tab's `pagehide` beacon hits
+  // /api/bye?doc=<id>, which schedules unregister of <id> after a grace
+  // window. A fresh /api/events or /api/agent/events connect on the same
+  // doc cancels the timer, so a tab refresh or a tail subscriber keeps the
+  // session alive. At fire time we only unregister if BOTH the lifecycle
+  // (browser) and agent (tail) client sets are empty.
+  const byeGraceMs =
+    Number(process.env.MARK_IT_BYE_GRACE_MS) || 3_000;
+  const unregisterTimers = new Map<string, NodeJS.Timeout>();
+  function scheduleUnregister(docId: string) {
+    const existing = unregisterTimers.get(docId);
+    if (existing) clearTimeout(existing);
+    const t = setTimeout(async () => {
+      unregisterTimers.delete(docId);
+      const sess = registry.get(docId);
+      if (!sess) return;
+      if (sess.lifecycleClients.size > 0) return;
+      if (sess.agentSseClients.size > 0) return;
+      await registry.unregister(docId).catch(() => undefined);
+    }, byeGraceMs);
+    t.unref();
+    unregisterTimers.set(docId, t);
+  }
+  function cancelUnregister(docId: string) {
+    const existing = unregisterTimers.get(docId);
+    if (existing) {
+      clearTimeout(existing);
+      unregisterTimers.delete(docId);
+    }
+  }
+
   const server = await createServer({
     root: WEB_ROOT,
     server: {
@@ -126,8 +157,10 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
       markItSidecarPlugin(registry, null),
       markItEventsPlugin(registry, {
         onConnect: () => lifecycle.bump(),
+        onDocConnect: cancelUnregister,
+        onByeForDoc: scheduleUnregister,
       }),
-      markItAgentStreamPlugin(registry),
+      markItAgentStreamPlugin(registry, { onDocConnect: cancelUnregister }),
       markItAgentPlugin(registry),
       markItSessionPlugin(registry, null, opts.db),
       markItTreePlugin(opts.db, null, registry),

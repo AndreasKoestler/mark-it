@@ -14,7 +14,10 @@ function formatEvent(env: EventEnvelope): string {
   return `id: ${env.id}\nevent: ${env.type}\ndata: ${JSON.stringify(env.data)}\n\n`;
 }
 
-export function markItAgentStreamPlugin(registry: SessionRegistry): Plugin {
+export function markItAgentStreamPlugin(
+  registry: SessionRegistry,
+  hooks: { onDocConnect?(docId: string): void } = {},
+): Plugin {
   return {
     name: "mark-it-agent-stream",
     configureServer(server) {
@@ -45,6 +48,9 @@ export function markItAgentStreamPlugin(registry: SessionRegistry): Plugin {
 
         res.write("event: ready\ndata: {}\n\n");
         sess.agentSseClients.add(res);
+        // Tail subscribers count as "this doc is in use" — cancel any
+        // pending bye-driven unregister for the same docId.
+        hooks.onDocConnect?.(sess.docId);
 
         req.on("close", () => {
           sess.agentSseClients.delete(res);

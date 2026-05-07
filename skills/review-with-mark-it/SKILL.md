@@ -72,17 +72,18 @@ If the user says no (or has previously declined for this conversation), skip and
 
 ### 3. Register the doc, then start the tail subscriber
 
-`mark-it <path>` registers and exits. `mark-it tail <path>` is the long-running consumer. Run them in this order, the second in the background:
+`mark-it <path>` registers and exits, printing the docId on stdout. `mark-it tail` is the long-running consumer; pass the docId so the lookup is exact in both legacy and DB modes:
 
 ```bash
-# Foreground — completes in <1s. Spawns the daemon if needed and opens the browser.
-mark-it <absolute-path-to-md>
+# Foreground — completes in <1s. Spawns the daemon if needed, opens the
+# browser, and prints the docId on stdout.
+DOC_ID=$(mark-it <absolute-path-to-md>)
 
 # Background — streams JSONL on stdout for the lifetime of the doc.
-mark-it tail <absolute-path-to-md>
+mark-it tail --doc-id "$DOC_ID"
 ```
 
-Use `Bash` with `run_in_background: true` for the second call. If the user prefers no auto-open, pass `--no-open` to the first call.
+Use `Bash` with `run_in_background: true` for the second call. If the user prefers no auto-open, pass `--no-open` to the first call. (For legacy-mode-only flows, `mark-it tail <path>` derives the docId from the path; the explicit `--doc-id` form is the recommended default.)
 
 Tell the user the loop is now active and instruct them to keep adding comments and clicking Send; you'll apply each round's edits as they come in. The terminal session is yours, not theirs — no need to "return to the terminal".
 

@@ -7,22 +7,24 @@ import { docIdForLegacyPath } from "../daemon/ids.js";
 export const tailCommand = defineCommand({
   meta: {
     name: "tail",
-    description: "Stream agent events for <path> as JSONL on stdout.",
+    description: "Stream agent events for a registered doc as JSONL on stdout.",
   },
   args: {
     file: {
       type: "positional",
-      description: "Path to the Markdown file (the same path you passed to `mark-it open`).",
-      required: true,
+      description:
+        "Markdown path. Used to derive the legacy-mode docId. Omit when --doc-id is supplied.",
+      required: false,
+    },
+    "doc-id": {
+      type: "string",
+      description:
+        "Explicit docId to subscribe to. Use this for DB-mode docs (the value `mark-it open` printed on stdout).",
+      required: false,
     },
   },
   async run({ args }) {
-    const abs = resolve(process.cwd(), args.file);
-    if (!existsSync(abs)) {
-      console.error(`mark-it tail: file not found: ${abs}`);
-      process.exit(1);
-    }
-    const docId = docIdForLegacyPath(abs);
+    const docId = await resolveDocId(args);
     const info = await ensureDaemonRunning();
 
     const url = new URL(`http://127.0.0.1:${info.port}/api/agent/events`);
@@ -52,3 +54,17 @@ export const tailCommand = defineCommand({
     };
   },
 });
+
+async function resolveDocId(args: { file?: string; "doc-id"?: string }): Promise<string> {
+  if (args["doc-id"]) return args["doc-id"];
+  if (!args.file) {
+    console.error("mark-it tail: provide a file path or --doc-id");
+    process.exit(1);
+  }
+  const abs = resolve(process.cwd(), args.file);
+  if (!existsSync(abs)) {
+    console.error(`mark-it tail: file not found: ${abs}`);
+    process.exit(1);
+  }
+  return docIdForLegacyPath(abs);
+}

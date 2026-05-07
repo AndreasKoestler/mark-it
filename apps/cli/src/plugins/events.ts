@@ -12,8 +12,12 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 interface EventsLifecycle {
   /** Called when a new SSE client connects (resets idle timers, etc). */
   onConnect?(): void;
-  /** Called by the browser's pagehide beacon. */
+  /** Called by the browser's pagehide beacon (server-wide). */
   onBye?(): void;
+  /** Per-doc bye — schedules unregister after a grace window. */
+  onByeForDoc?(docId: string): void;
+  /** Per-doc connect — cancels any pending unregister for that doc. */
+  onDocConnect?(docId: string): void;
   /** Optional shared set of all SSE clients (legacy whole-server semantics). */
   globalClients?: Set<ServerResponse>;
 }
@@ -31,6 +35,14 @@ export function markItEventsPlugin(
           return;
         }
         lifecycle.onBye?.();
+        // Per-doc bye lets the daemon schedule unregister of an unwatched
+        // session after a grace window. Reads ?doc from URL since /api/bye
+        // is fired by sendBeacon, which can't carry headers.
+        if (lifecycle.onByeForDoc) {
+          const url = new URL(req.url ?? "", "http://localhost");
+          const docId = url.searchParams.get("doc");
+          if (docId) lifecycle.onByeForDoc(docId);
+        }
         json(res, 200, { ok: true });
       });
 
@@ -44,7 +56,10 @@ export function markItEventsPlugin(
         res.setHeader("Connection", "keep-alive");
         res.write("event: ready\ndata: {}\n\n");
 
-        if (sess) sess.lifecycleClients.add(res);
+        if (sess) {
+          sess.lifecycleClients.add(res);
+          lifecycle.onDocConnect?.(sess.docId);
+        }
         if (lifecycle.globalClients) lifecycle.globalClients.add(res);
         lifecycle.onConnect?.();
 
