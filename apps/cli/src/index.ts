@@ -6,6 +6,7 @@ import { userCommand } from "./commands/user.js";
 import { projectCommand } from "./commands/project.js";
 import { daemonCommand } from "./commands/daemon.js";
 import { openCommand } from "./commands/open.js";
+import { tailCommand } from "./commands/tail.js";
 
 const KNOWN_SUBCOMMANDS = new Set([
   "review",
@@ -14,6 +15,7 @@ const KNOWN_SUBCOMMANDS = new Set([
   "project",
   "daemon",
   "open",
+  "tail",
 ]);
 
 /**
@@ -38,6 +40,7 @@ const main = defineCommand({
     project: projectCommand,
     daemon: daemonCommand,
     open: openCommand,
+    tail: tailCommand,
   },
 });
 

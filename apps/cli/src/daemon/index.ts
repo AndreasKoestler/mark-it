@@ -8,6 +8,7 @@ import { markItRegistryPlugin } from "../plugins/registry.js";
 import { markItDocumentPlugin } from "../plugins/document.js";
 import { markItSidecarPlugin } from "../plugins/sidecar.js";
 import { markItAgentPlugin } from "../plugins/agent.js";
+import { markItAgentStreamPlugin } from "../plugins/agent-stream.js";
 import { markItEventsPlugin } from "../plugins/events.js";
 import { markItSessionPlugin } from "../plugins/session.js";
 import { markItTreePlugin } from "../plugins/tree.js";
@@ -126,6 +127,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
       markItEventsPlugin(registry, {
         onConnect: () => lifecycle.bump(),
       }),
+      markItAgentStreamPlugin(registry),
       markItAgentPlugin(registry),
       markItSessionPlugin(registry, null, opts.db),
       markItTreePlugin(opts.db, null, registry),

@@ -13,6 +13,7 @@ import { docIdForSpec } from "./daemon/ids.js";
 import { markItDocumentPlugin } from "./plugins/document.js";
 import { markItSidecarPlugin } from "./plugins/sidecar.js";
 import { markItAgentPlugin } from "./plugins/agent.js";
+import { markItAgentStreamPlugin } from "./plugins/agent-stream.js";
 import { markItEventsPlugin } from "./plugins/events.js";
 import { markItSessionPlugin } from "./plugins/session.js";
 import { markItTreePlugin } from "./plugins/tree.js";
@@ -156,6 +157,7 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
         onConnect: () => lifecycle.onClientConnect(),
         onBye: () => lifecycle.onBye(),
       }),
+      markItAgentStreamPlugin(registry),
       markItAgentPlugin(registry),
       markItSessionPlugin(registry, opts.session ?? null, opts.db),
       markItTreePlugin(opts.db, opts.session ?? null, registry),

@@ -1,11 +1,11 @@
+import { randomUUID } from "node:crypto";
 import type { Plugin } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolveComment } from "@mrsf/cli";
 import type { SessionRegistry } from "../daemon/sessions.js";
 import { resolveSession } from "../server.js";
-
-const SEND_BEGIN = "===MARK-IT-SEND-BEGIN===";
-const SEND_END = "===MARK-IT-SEND-END===";
+import type { EventEnvelope } from "../agent/buffer.js";
+import { broadcastAgentEvent } from "./agent-stream.js";
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
@@ -21,11 +21,22 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
 }
 
+interface AgentSendBody {
+  text: string;
+  resolveIds?: string[];
+  comments?: unknown;
+}
+
 export function markItAgentPlugin(registry: SessionRegistry): Plugin {
   return {
     name: "mark-it-agent",
     configureServer(server) {
       server.middlewares.use("/api/agent", async (req, res, next) => {
+        // Don't shadow /api/agent/events (handled by markItAgentStreamPlugin).
+        if (req.url?.startsWith("/api/agent/events")) {
+          next();
+          return;
+        }
         if (req.method !== "POST") {
           next();
           return;
@@ -37,7 +48,7 @@ export function markItAgentPlugin(registry: SessionRegistry): Plugin {
         }
         const sess = r.session;
         try {
-          const body = await readJson<{ text: string; resolveIds?: string[] }>(req);
+          const body = await readJson<AgentSendBody>(req);
           const text = typeof body.text === "string" ? body.text : "";
           const ids = Array.isArray(body.resolveIds) ? body.resolveIds : [];
 
@@ -48,16 +59,20 @@ export function markItAgentPlugin(registry: SessionRegistry): Plugin {
             await sess.sidecar.save(doc);
           }
 
-          json(res, 200, { ok: true });
+          const env: EventEnvelope = {
+            id: randomUUID(),
+            type: "send",
+            data: {
+              docId: sess.docId,
+              text,
+              comments: body.comments ?? null,
+              resolveIds: ids,
+            },
+          };
+          sess.pushAgentEvent(env);
+          broadcastAgentEvent(sess.agentSseClients, env);
 
-          // Stream the chunk to the agent — wrapped in delimiter lines so the
-          // receiving side can frame multiple rounds in one mark-it lifetime.
-          // Task 11 will replace this with the SSE broadcast on the per-doc
-          // agent stream.
-          res.on("finish", () => {
-            const inner = text.endsWith("\n") ? text : text + "\n";
-            process.stdout.write(`${SEND_BEGIN}\n${inner}${SEND_END}\n`);
-          });
+          json(res, 200, { ok: true, eventId: env.id });
         } catch (err) {
           json(res, 500, { error: String(err) });
         }
