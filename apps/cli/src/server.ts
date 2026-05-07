@@ -14,7 +14,8 @@ import {
   type AddCommentOptions,
 } from "@mrsf/cli";
 import type { Db } from "./db/index.js";
-import { createActiveDocument, type ActiveDocument } from "./active-document.js";
+import { createSessionRegistry, type DocSession, type SessionRegistry } from "./daemon/sessions.js";
+import { docIdForSpec } from "./daemon/ids.js";
 import { markItSessionPlugin } from "./plugins/session.js";
 import { markItTreePlugin } from "./plugins/tree.js";
 
@@ -48,8 +49,6 @@ class IdentityError extends Error {}
 function enforceIdentity(session: Session | null, action: string, payload: unknown): void {
   if (!session) return; // legacy bare-file mode
   if (process.env.MARK_IT_ALLOW_AUTHOR_OVERRIDE === "1") return;
-  // Mutations that don't carry an author are pure references (resolve/unresolve/delete
-  // by id, resolveAll). Skip them — we still trust the pinned local server boundary.
   const writeActions = new Set(["add", "reply", "edit"]);
   if (!writeActions.has(action)) return;
   const p = payload as { author?: string; actor?: string; x_user_id?: string };
@@ -59,15 +58,6 @@ function enforceIdentity(session: Session | null, action: string, payload: unkno
   }
 }
 
-/**
- * Turns "tab closed" into a process exit.
- *
- * The browser fires `navigator.sendBeacon("/api/bye")` on `pagehide`, giving
- * us an explicit, reliable signal that the user is leaving. We schedule a
- * grace timer on bye; a new SSE connect within the window cancels it (this
- * is what absorbs page reloads — pagehide → bye, then the reload connects
- * fresh and we cancel).
- */
 const IDLE_EXIT_GRACE_MS = Number(process.env.MARK_IT_IDLE_EXIT_GRACE_MS) || 3_000;
 
 interface Lifecycle {
@@ -110,19 +100,52 @@ function createLifecycle(): Lifecycle {
   };
 }
 
+/**
+ * Resolve the DocSession for a request. `?doc=<id>` (or `X-Mark-It-Doc-Id`)
+ * picks one explicitly; otherwise the registry's "active" session is used
+ * (legacy single-tab semantics — daemon mode in Task 6 will require explicit
+ * doc selection).
+ */
+export function resolveSession(
+  req: IncomingMessage,
+  registry: SessionRegistry,
+): { session: DocSession } | { error: string; status: number } {
+  const url = new URL(req.url ?? "", "http://localhost");
+  const explicit =
+    url.searchParams.get("doc") ??
+    (typeof req.headers["x-mark-it-doc-id"] === "string"
+      ? (req.headers["x-mark-it-doc-id"] as string)
+      : null);
+
+  if (explicit) {
+    const sess = registry.get(explicit);
+    if (!sess) return { error: `unknown doc: ${explicit}`, status: 404 };
+    return { session: sess };
+  }
+
+  const fallback = registry.getActive();
+  if (fallback) return { session: fallback };
+  return { error: "no sessions", status: 404 };
+}
+
 export async function startServer(opts: StartServerOptions): Promise<void> {
   const lifecycle = createLifecycle();
+  // Task 5: legacy single-tab semantics — broadcasts go to the shared
+  // lifecycle clients set so an in-place doc switch reaches the existing
+  // tab. Task 6 will replace this with per-doc broadcast in daemon mode.
+  const registry = createSessionRegistry({
+    broadcast: (_docId, event) => {
+      broadcastSse(lifecycle.clients, event);
+    },
+  });
 
-  const active = createActiveDocument({
-    initial: opts.initialActive,
+  const initialDoc = registry.register(opts.initialActive, {
     db: opts.db,
-    session: opts.session,
-    clients: lifecycle.clients,
-    broadcastSse,
+    session: opts.session ?? null,
   });
 
   // Kick off the startup re-anchor in parallel with Vite's startup work.
-  const reanchorPromise = active.ensureFreshAnchors();
+  const reanchorPromise = initialDoc.ensureFreshAnchors();
 
   const server = await createServer({
     root: WEB_ROOT,
@@ -145,12 +168,12 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     },
     plugins: [
       react({ jsxRuntime: "automatic" }),
-      markItDocumentPlugin(active),
-      markItSidecarPlugin(active, opts.session ?? null),
-      markItEventsPlugin(lifecycle),
-      markItAgentPlugin(active),
-      markItSessionPlugin(active, opts.session ?? null, opts.db),
-      markItTreePlugin(opts.db, opts.session ?? null, active),
+      markItDocumentPlugin(registry),
+      markItSidecarPlugin(registry, opts.session ?? null),
+      markItEventsPlugin(registry, lifecycle),
+      markItAgentPlugin(registry),
+      markItSessionPlugin(registry, opts.session ?? null, opts.db),
+      markItTreePlugin(opts.db, opts.session ?? null, registry),
     ],
     define: {
       __MARK_IT_FILE_NAME__: JSON.stringify(basename(opts.initialActive.filePath)),
@@ -170,7 +193,7 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
   }
 }
 
-function markItDocumentPlugin(active: ActiveDocument): Plugin {
+function markItDocumentPlugin(registry: SessionRegistry): Plugin {
   return {
     name: "mark-it-document",
     configureServer(server) {
@@ -179,8 +202,13 @@ function markItDocumentPlugin(active: ActiveDocument): Plugin {
           next();
           return;
         }
+        const r = resolveSession(req, registry);
+        if ("error" in r) {
+          json(res, r.status, { error: r.error });
+          return;
+        }
         try {
-          const { spec } = active.getActive();
+          const { spec } = r.session;
           const content = await readFile(spec.filePath, "utf8");
           json(res, 200, {
             path: spec.filePath,
@@ -195,30 +223,35 @@ function markItDocumentPlugin(active: ActiveDocument): Plugin {
   };
 }
 
-function markItSidecarPlugin(active: ActiveDocument, session: Session | null): Plugin {
+function markItSidecarPlugin(registry: SessionRegistry, session: Session | null): Plugin {
   return {
     name: "mark-it-sidecar",
     configureServer(server) {
-      async function loadDoc(): Promise<MrsfDocument> {
-        const { spec, sidecar } = active.getActive();
-        const doc = await sidecar.load();
+      async function loadDoc(sess: DocSession): Promise<MrsfDocument> {
+        const doc = await sess.sidecar.load();
         if (!doc.document) {
-          doc.document = relative(process.cwd(), spec.filePath);
+          doc.document = relative(process.cwd(), sess.spec.filePath);
         }
         return doc;
       }
 
       server.middlewares.use("/api/sidecar", async (req, res, next) => {
+        const r = resolveSession(req, registry);
+        if ("error" in r) {
+          json(res, r.status, { error: r.error });
+          return;
+        }
+        const sess = r.session;
+
         if (req.method === "GET") {
           try {
             // Watcher-driven re-anchoring is a latency optimization, not a
             // correctness path: editor swap-write patterns and bursty edits
             // can slip past chokidar. Re-checking on every GET ensures the
             // client never sees a stale anchor on refresh.
-            await active.ensureFreshAnchors();
-            const doc = await loadDoc();
-            const { spec } = active.getActive();
-            const sidecarPath = `${spec.filePath}.review.yaml`;
+            await sess.ensureFreshAnchors();
+            const doc = await loadDoc(sess);
+            const sidecarPath = `${sess.spec.filePath}.review.yaml`;
             json(res, 200, { doc, sidecarPath });
           } catch (err) {
             json(res, 500, { error: String(err) });
@@ -229,17 +262,16 @@ function markItSidecarPlugin(active: ActiveDocument, session: Session | null): P
         if (req.method === "POST") {
           try {
             const body = await readJson<{ action: string; payload?: unknown }>(req);
-            const doc = await loadDoc();
-            const { spec, sidecar } = active.getActive();
+            const doc = await loadDoc(sess);
             const updated = await applyAction(
               doc,
               body.action,
               body.payload,
-              spec.filePath,
+              sess.spec.filePath,
               session,
             );
-            await sidecar.save(updated);
-            const sidecarPath = `${spec.filePath}.review.yaml`;
+            await sess.sidecar.save(updated);
+            const sidecarPath = `${sess.spec.filePath}.review.yaml`;
             json(res, 200, { doc: updated, sidecarPath });
           } catch (err) {
             if (err instanceof IdentityError) {
@@ -260,7 +292,7 @@ function markItSidecarPlugin(active: ActiveDocument, session: Session | null): P
 const SEND_BEGIN = "===MARK-IT-SEND-BEGIN===";
 const SEND_END = "===MARK-IT-SEND-END===";
 
-function markItAgentPlugin(active: ActiveDocument): Plugin {
+function markItAgentPlugin(registry: SessionRegistry): Plugin {
   return {
     name: "mark-it-agent",
     configureServer(server) {
@@ -269,23 +301,30 @@ function markItAgentPlugin(active: ActiveDocument): Plugin {
           next();
           return;
         }
+        const r = resolveSession(req, registry);
+        if ("error" in r) {
+          json(res, r.status, { error: r.error });
+          return;
+        }
+        const sess = r.session;
         try {
           const body = await readJson<{ text: string; resolveIds?: string[] }>(req);
           const text = typeof body.text === "string" ? body.text : "";
           const ids = Array.isArray(body.resolveIds) ? body.resolveIds : [];
 
           if (ids.length > 0) {
-            const { sidecar } = active.getActive();
-            const doc = await sidecar.load();
+            const doc = await sess.sidecar.load();
             if (!Array.isArray(doc.comments)) doc.comments = [];
             for (const id of ids) resolveComment(doc, id);
-            await sidecar.save(doc);
+            await sess.sidecar.save(doc);
           }
 
           json(res, 200, { ok: true });
 
           // Stream the chunk to the agent — wrapped in delimiter lines so the
           // receiving side can frame multiple rounds in one mark-it lifetime.
+          // Task 11 will replace this with the SSE broadcast on the per-doc
+          // agent stream.
           res.on("finish", () => {
             const inner = text.endsWith("\n") ? text : text + "\n";
             process.stdout.write(`${SEND_BEGIN}\n${inner}${SEND_END}\n`);
@@ -298,7 +337,7 @@ function markItAgentPlugin(active: ActiveDocument): Plugin {
   };
 }
 
-function markItEventsPlugin(lifecycle: Lifecycle): Plugin {
+function markItEventsPlugin(registry: SessionRegistry, lifecycle: Lifecycle): Plugin {
   return {
     name: "mark-it-events",
     configureServer(server) {
@@ -307,20 +346,31 @@ function markItEventsPlugin(lifecycle: Lifecycle): Plugin {
           next();
           return;
         }
+        // /api/bye doesn't need to resolve a specific doc — it's a
+        // server-wide "tab is leaving" signal. The lifecycle still
+        // schedules exit when no clients are present.
         lifecycle.onBye();
         json(res, 200, { ok: true });
       });
 
       server.middlewares.use("/api/events", (req, res) => {
+        // /api/events is registry-wide in legacy mode; per-doc broadcast
+        // lives on `lifecycle.clients` until Task 6 splits it.
+        const r = resolveSession(req, registry);
+        const sess = "session" in r ? r.session : null;
+
         res.statusCode = 200;
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
         res.write("event: ready\ndata: {}\n\n");
+
+        if (sess) sess.lifecycleClients.add(res);
         lifecycle.clients.add(res);
         lifecycle.onClientConnect();
 
         req.on("close", () => {
+          if (sess) sess.lifecycleClients.delete(res);
           lifecycle.clients.delete(res);
         });
       });
@@ -477,3 +527,6 @@ function openBrowser(url: string): void {
     "xdg-open";
   spawn(cmd, [url], { stdio: "ignore", detached: true }).unref();
 }
+
+// Re-export for plugins that still import from this module.
+export { docIdForSpec };

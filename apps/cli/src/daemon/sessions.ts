@@ -30,6 +30,11 @@ export interface SessionRegistry {
   unregister(docId: string): Promise<void>;
   size(): number;
   all(): DocSession[];
+  /** docId of the "default" session for legacy single-tab mode. */
+  activeDocId(): string | undefined;
+  setActive(docId: string): void;
+  getActive(): DocSession | undefined;
+  broadcast(docId: string, event: string): void;
 }
 
 function hashContent(content: string): string {
@@ -40,6 +45,7 @@ export function createSessionRegistry(deps: {
   broadcast: (docId: string, event: string) => void;
 }): SessionRegistry {
   const sessions = new Map<string, DocSession>();
+  let active: string | undefined;
 
   function makeStore(
     s: ActiveDocumentSpec,
@@ -130,9 +136,13 @@ export function createSessionRegistry(deps: {
     register(spec, ext) {
       const docId = docIdForSpec(spec);
       const existing = sessions.get(docId);
-      if (existing) return existing;
+      if (existing) {
+        active = docId;
+        return existing;
+      }
       const sess = build(spec, ext);
       sessions.set(docId, sess);
+      active = docId;
       return sess;
     },
     get: (id) => sessions.get(id),
@@ -141,8 +151,18 @@ export function createSessionRegistry(deps: {
       if (!s) return;
       await s.dispose();
       sessions.delete(id);
+      if (active === id) {
+        active = sessions.keys().next().value;
+      }
     },
     size: () => sessions.size,
     all: () => [...sessions.values()],
+    activeDocId: () => active,
+    setActive(id) {
+      if (!sessions.has(id)) throw new Error(`setActive: unknown doc ${id}`);
+      active = id;
+    },
+    getActive: () => (active ? sessions.get(active) : undefined),
+    broadcast: (docId, event) => deps.broadcast(docId, event),
   };
 }

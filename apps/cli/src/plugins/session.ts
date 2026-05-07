@@ -1,8 +1,8 @@
 import { basename } from "node:path";
 import type { Plugin } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { ActiveDocument } from "../active-document.js";
-import type { Session } from "../server.js";
+import type { SessionRegistry } from "../daemon/sessions.js";
+import { resolveSession, type Session } from "../server.js";
 import type { Db } from "../db/index.js";
 import { findDocumentById } from "../db/queries.js";
 
@@ -22,7 +22,7 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
 }
 
 export function markItSessionPlugin(
-  active: ActiveDocument,
+  registry: SessionRegistry,
   session: Session | null,
   db?: Db,
 ): Plugin {
@@ -35,15 +35,22 @@ export function markItSessionPlugin(
           res.end();
           return;
         }
-        const { spec } = active.getActive();
+        const r = resolveSession(req, registry);
+        if ("error" in r) {
+          json(res, r.status, { error: r.error });
+          return;
+        }
+        const { spec, docId } = r.session;
         if (!session) {
           json(res, 200, {
             legacy: true,
+            docId,
             active: { filePath: spec.filePath, name: basename(spec.filePath) },
           });
           return;
         }
         json(res, 200, {
+          docId,
           org: { id: session.orgId, name: session.orgName },
           user: { id: session.userId, handle: session.userHandle },
           active: {
@@ -84,14 +91,23 @@ export function markItSessionPlugin(
             json(res, 403, { error: "cross-org access denied" });
             return;
           }
-          await active.setActive({
-            filePath: doc.file_path,
-            documentId: doc.id,
-            documentName: doc.name,
-            projectId: doc.project_id,
-            projectName: project.name,
-          });
-          json(res, 200, { ok: true });
+          // Register (or reuse) a session for the requested doc and make it
+          // the registry's active doc — legacy in-place tab swap.
+          const sess = registry.register(
+            {
+              filePath: doc.file_path,
+              documentId: doc.id,
+              documentName: doc.name,
+              projectId: doc.project_id,
+              projectName: project.name,
+            },
+            { db, session },
+          );
+          registry.setActive(sess.docId);
+          await sess.ensureFreshAnchors();
+          // Tell connected tabs to re-fetch.
+          registry.broadcast(sess.docId, "change");
+          json(res, 200, { ok: true, docId: sess.docId });
         } catch (err) {
           json(res, 500, { error: String(err) });
         }

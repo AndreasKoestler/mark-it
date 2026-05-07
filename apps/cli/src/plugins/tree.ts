@@ -1,7 +1,7 @@
 import type { Plugin } from "vite";
 import type { ServerResponse } from "node:http";
-import type { ActiveDocument } from "../active-document.js";
-import type { Session } from "../server.js";
+import type { SessionRegistry } from "../daemon/sessions.js";
+import { resolveSession, type Session } from "../server.js";
 import type { Db } from "../db/index.js";
 import { loadTreeForOrg } from "../db/queries.js";
 
@@ -14,7 +14,7 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 export function markItTreePlugin(
   db: Db | undefined,
   session: Session | null,
-  active: ActiveDocument,
+  registry: SessionRegistry,
 ): Plugin {
   return {
     name: "mark-it-tree",
@@ -30,7 +30,9 @@ export function markItTreePlugin(
           return;
         }
         const tree = loadTreeForOrg(db, session.orgId);
-        const activeId = active.getActive().spec.documentId;
+        const r = resolveSession(req, registry);
+        const activeId =
+          "session" in r ? r.session.spec.documentId : undefined;
         const annotated = {
           ...tree,
           projects: tree.projects.map((p) => ({
