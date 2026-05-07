@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, relative } from "node:path";
 import { spawn } from "node:child_process";
@@ -11,8 +10,6 @@ import {
   resolveComment,
   unresolveComment,
   removeComment,
-  reanchorDocumentText,
-  applyReanchorResults,
   type MrsfDocument,
   type AddCommentOptions,
 } from "@mrsf/cli";
@@ -125,7 +122,7 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
   });
 
   // Kick off the startup re-anchor in parallel with Vite's startup work.
-  const reanchorPromise = runStartupReanchor(active);
+  const reanchorPromise = active.ensureFreshAnchors();
 
   const server = await createServer({
     root: WEB_ROOT,
@@ -173,21 +170,6 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
   }
 }
 
-async function runStartupReanchor(active: ActiveDocument): Promise<void> {
-  try {
-    const { spec, sidecar } = active.getActive();
-    const doc = await sidecar.load();
-    if (!Array.isArray(doc.comments) || doc.comments.length === 0) return;
-    if (!existsSync(spec.filePath)) return;
-    const content = await readFile(spec.filePath, "utf8");
-    const results = await reanchorDocumentText(doc, content);
-    applyReanchorResults(doc, results);
-    await sidecar.save(doc);
-  } catch (err) {
-    console.error("mark-it: startup re-anchor failed:", err);
-  }
-}
-
 function markItDocumentPlugin(active: ActiveDocument): Plugin {
   return {
     name: "mark-it-document",
@@ -229,6 +211,11 @@ function markItSidecarPlugin(active: ActiveDocument, session: Session | null): P
       server.middlewares.use("/api/sidecar", async (req, res, next) => {
         if (req.method === "GET") {
           try {
+            // Watcher-driven re-anchoring is a latency optimization, not a
+            // correctness path: editor swap-write patterns and bursty edits
+            // can slip past chokidar. Re-checking on every GET ensures the
+            // client never sees a stale anchor on refresh.
+            await active.ensureFreshAnchors();
             const doc = await loadDoc();
             const { spec } = active.getActive();
             const sidecarPath = `${spec.filePath}.review.yaml`;
