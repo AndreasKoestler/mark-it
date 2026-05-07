@@ -1,27 +1,29 @@
 ---
 name: review-with-mark-it
-description: Use whenever you produce a substantial Markdown artifact (plan, spec, design doc, PRD, summary, refactor outline, code-review writeup, generated docs) that the user might want to comment on. Offers to open it in `mark-it` — a browser-based reviewer that streams structured, line-anchored comments to stdout — then applies the user's feedback as targeted revisions in a long-running review loop. Triggers when the agent is about to hand back a long Markdown deliverable for the user's review.
+description: Use whenever you produce a substantial Markdown artifact (plan, spec, design doc, PRD, summary, refactor outline, code-review writeup, generated docs) that the user might want to comment on. Offers to open it in `mark-it` — a browser-based reviewer that streams structured, line-anchored comments as JSONL — then applies the user's feedback as targeted revisions in a long-running review loop. Triggers when the agent is about to hand back a long Markdown deliverable for the user's review.
 ---
 
 # Reviewing Markdown artifacts with mark-it
 
-`mark-it` is a global CLI installed on this machine (`mark-it <path>`) that opens a Markdown file in a browser-based commenting UI. The user attaches line-anchored comments and clicks **Send to agent** in the toolbar (or per-thread in the sidebar). When they do, `mark-it`:
+`mark-it` is a global CLI installed on this machine. Two subcommands matter for this skill:
+
+- `mark-it <path>` — registers the file with the long-lived **mark-it daemon** (auto-spawned on first use), focuses the open tab if any, and **exits in <1s**. Auto-opens the browser unless the doc is already open.
+- `mark-it tail <path>` — connects to the daemon's per-doc Server-Sent Events stream and **prints one JSON object per Send round** to stdout, then exits when the user closes the tab.
+
+When the user clicks **Send to agent** in the toolbar (or per-thread in the sidebar), `mark-it`:
 
 - Persists the full comment state to `<path>.review.yaml` (Sidemark v1.0 sidecar).
-- Writes a structured plain-text chunk to **stdout**, wrapped in fixed delimiter lines so multiple rounds in one session can be framed:
+- Broadcasts a structured `send` event on the per-doc SSE channel. `mark-it tail` surfaces it as a single JSONL line:
 
-  ```
-  ===MARK-IT-SEND-BEGIN===
-  Document: <relative path>
-  Comment N (line L) — "<anchored text>":
-    <author> — <ISO timestamp>
-    > <comment body>
-  ===MARK-IT-SEND-END===
+  ```json
+  {"docId":"legacy-…","text":"Document: <relative path>\n\nComment 1 (line L) — \"<anchored text>\":\n  <author> — <ISO timestamp>\n  > <comment body>\n","comments":[{"id":"…","line":17,"text":"…","author":"…",…}],"resolveIds":[…]}
   ```
 
-- **Stays running.** The CLI does **not** exit on Send; it exits when the user closes the browser tab (5s grace window).
+  The `comments` array is the structured payload (each comment object includes `id`, `line`, `selected_text`, `text`, `author`, replies, etc.). `text` is the same human-readable rendering, kept for cheap display. `resolveIds` lists the comment IDs the user resolved as part of this Send.
 
-So `mark-it <path>` is a long-running review loop: send → agent applies edits → comments re-anchor → send more → ... → user closes tab → mark-it exits.
+- The daemon **stays running**; tab close → daemon idle-exits after a grace window. `mark-it tail` exits 0 when the daemon signals `done`.
+
+So the loop for this skill is: `mark-it <path>` → `mark-it tail <path>` (background) → read one JSONL line per Send → apply edits → repeat → tail exits when tab closes.
 
 ## When to invoke this skill
 
@@ -46,7 +48,7 @@ When the agent is in Claude Code plan mode and writes a plan file (e.g. `~/.clau
 
 - **Inside plan mode**, the harness forbids running non-read-only tools, so you cannot launch `mark-it` from there. Plan-mode workflow still ends with `ExitPlanMode` (or `AskUserQuestion`) — don't try to call this skill in place of `ExitPlanMode`.
 - **Before calling `ExitPlanMode`**, use `AskUserQuestion` to offer the user three options: (a) approve as-is, (b) approve with extra permissions, (c) review the plan in mark-it before exiting. Mention that picking (c) means: "I'll exit plan mode, then immediately open the plan in mark-it for line-anchored review before starting implementation."
-- **After the user picks (c)** and `ExitPlanMode` resolves with approval: **don't write any implementation code yet**. Run `mark-it <plan-file-absolute-path>` per the workflow below; loop until the user closes the tab; only then continue with implementation.
+- **After the user picks (c)** and `ExitPlanMode` resolves with approval: **don't write any implementation code yet**. Run the workflow below; loop until `mark-it tail` exits; only then continue with implementation.
 - **If the user has declined** mark-it review for this conversation already, skip the option in `AskUserQuestion`.
 
 ## Workflow
@@ -64,68 +66,78 @@ State the path back to the user explicitly.
 
 Ask exactly once, plainly:
 
-> "Want to review `<path>` interactively in mark-it? I'll watch for your comments, apply them as edits, and re-run mark-it until you close the tab."
+> "Want to review `<path>` interactively in mark-it? I'll watch for your comments, apply them as edits, and keep going until you close the tab."
 
 If the user says no (or has previously declined for this conversation), skip and continue with the regular flow.
 
-### 3. Spawn mark-it in the background and stream stdout
+### 3. Register the doc, then start the tail subscriber
 
-`mark-it` is long-running. Use `Bash` with `run_in_background: true`:
+`mark-it <path>` registers and exits. `mark-it tail <path>` is the long-running consumer. Run them in this order, the second in the background:
 
 ```bash
+# Foreground — completes in <1s. Spawns the daemon if needed and opens the browser.
 mark-it <absolute-path-to-md>
+
+# Background — streams JSONL on stdout for the lifetime of the doc.
+mark-it tail <absolute-path-to-md>
 ```
 
-Mark-it auto-opens the user's default browser. If the user prefers no auto-open, pass `--no-open`.
+Use `Bash` with `run_in_background: true` for the second call. If the user prefers no auto-open, pass `--no-open` to the first call.
 
 Tell the user the loop is now active and instruct them to keep adding comments and clicking Send; you'll apply each round's edits as they come in. The terminal session is yours, not theirs — no need to "return to the terminal".
 
-### 4. Stream and frame chunks
+### 4. Read JSONL and apply
 
-Use `Monitor` (or `Read` against the background shell as a fallback) to watch the background process's stdout. Each Send produces a complete envelope:
+Use `Monitor` against the background `mark-it tail` shell. Each line is one Send round, a complete JSON envelope:
 
+```json
+{
+  "docId": "legacy-…",
+  "text": "Document: <relative path>\n\nComment 1 (line L) — \"<anchored text>\":\n  <author> — <ISO timestamp>\n  > <comment body>\n",
+  "comments": [
+    {
+      "id": "…",
+      "line": 17,
+      "end_line": 17,
+      "selected_text": "<anchor>",
+      "text": "<comment body>",
+      "author": "…",
+      "timestamp": "…",
+      "replies": [{ "author": "…", "text": "…", "timestamp": "…" }]
+    }
+  ],
+  "resolveIds": ["…"]
+}
 ```
-===MARK-IT-SEND-BEGIN===
-Document: <relative path>
 
-Comment N (line L) — "<anchored text>":
-  <author> — <ISO timestamp>
-  > <comment body, possibly multi-line>
-    ↳ <reply author> — <ISO timestamp>
-      > <reply body>
-
-===MARK-IT-SEND-END===
-```
-
-Match the delimiters as **whole lines** (start of line + literal text + newline) to avoid false positives if a comment body happens to contain `===`. Replies appear under their parent indented with `↳`. Multiple roots are separated by a blank line.
-
-Ignore everything outside the BEGIN/END pair — Vite logs and the "mark-it: serving …" line live there too.
+Parse one line at a time (`JSON.parse(line)`). Prefer `comments[i].line` and `comments[i].text` over the rendered `text` blob — the structured fields are exact. The `text` blob is fine for showing the user a human-friendly summary in chat.
 
 ### 5. Apply the comments and loop
 
-For each envelope:
+For each comment in the envelope:
 
 - **Suggestion / issue / clarification request** → edit the artifact at the referenced `line`, then move on.
 - **Question** → answer in the artifact body, OR add a reply via the `/api/sidecar` endpoint (rare; usually editing is the right answer).
 - **Style / wording** → edit the affected block.
 - **Out-of-scope** → mention briefly that you've left this comment unaddressed and why.
 
-Each comment carries `selected_text` of the original block — the **immutable anchor**. Treat it as a pointer to the right block; don't preserve that exact wording in the rewrite. After you edit the file, mark-it's chokidar watcher re-anchors the comment automatically — the user sees a "drifted" badge in the sidebar.
+Each comment carries `selected_text` of the original block — the **immutable anchor**. Treat it as a pointer to the right block; don't preserve that exact wording in the rewrite. After you edit the file, mark-it re-anchors the comment automatically — the user sees a "drifted" badge in the sidebar.
 
 Briefly summarize what you applied in chat (so the user sees progress without checking the file) — then keep watching. Multiple rounds happen in the same session.
 
 ### 6. End of session
 
-Detect end via process exit (Monitor signals "done" or the background Bash returns). That's the user closing the tab. Summarize across all rounds: "Applied N comments across M Send rounds. Ready for next steps." Then continue with whatever the original task was (e.g., implementation after a plan review).
+Detect end via `mark-it tail` exit (Monitor signals "done" or the background Bash returns 0). That's the user closing the tab. Summarize across all rounds: "Applied N comments across M Send rounds. Ready for next steps." Then continue with whatever the original task was (e.g., implementation after a plan review).
 
 ## Important behaviors
 
-- **mark-it is long-running.** Send does NOT exit. Closing the tab does (5s grace window).
+- **`mark-it <path>` exits immediately.** It's a thin client of the long-lived daemon. The daemon idle-exits when no docs are registered and no tabs are open for ~10 min.
+- **`mark-it tail <path>` is the long-running half.** It exits when the user closes the tab.
 - **The sidecar `<path>.review.yaml`** keeps the comment history — don't delete it. The user may reopen mark-it on the same file later and expect resolved threads to be remembered.
 - **Sidemark is content-anchored.** Edits you make trigger an automatic re-anchor; comments track the new text via `anchored_text`. Never hand-edit `selected_text` or `selected_text_hash` in the sidecar.
 - **`Send and resolve`** flips comments to `resolved: true` atomically with the send. **`Send`** alone leaves them open (so the user can keep them visible while iterating).
+- **Replay on reconnect.** `mark-it tail` reconnects automatically with `Last-Event-ID`; brief network/agent restarts don't lose events (best-effort, last 100 events per doc).
 - **Auto-decline budget.** If the user declined a mark-it review earlier in the same conversation, skip the offer for the rest of the conversation unless they explicitly ask for it.
-- **Process killed before tab close.** If the agent process is killed before the user closes the tab, the tab will silently retry the SSE connection forever. Acceptable for v1.
 
 ## Decline pattern
 
@@ -135,7 +147,7 @@ Some users always prefer chat-based feedback. After a single "no" in a conversat
 
 - **Don't** invoke for chat replies, code outputs, or tiny notes.
 - **Don't** run mark-it on a file that doesn't exist on disk.
-- **Don't** invoke `mark-it` in the foreground (it would block the agent for the whole session).
-- **Don't** treat the first envelope as "the answer" — more rounds may come.
-- **Don't** match the BEGIN/END delimiters as substrings; require whole-line match.
-- **Don't** apply changes from comments inside the blockquote section's `selected_text` — that's just the anchor, not the user's instruction. Read the body (`> ...`) for the actual ask.
+- **Don't** invoke `mark-it tail` in the foreground (it would block the agent for the whole session). The first `mark-it <path>` call is foreground and exits in <1s — that one is fine.
+- **Don't** treat the first JSONL line as "the answer" — more Sends usually come.
+- **Don't** parse the rendered `text` blob with regex when the structured `comments[]` array is right there. Reach for `text` only for human-friendly chat summaries.
+- **Don't** apply changes from `comments[i].selected_text` — that's just the anchor, not the user's instruction. Read `comments[i].text` (the body) for the actual ask, and any nested `replies[]`.

@@ -1,13 +1,14 @@
 # mark-it
 
-A reviewer for Markdown files. Open a Markdown file in a side-by-side rendered/source view, add line-anchored comments, then either save them to a `.review.yaml` sidecar or stream them back to a calling agent on stdout.
+A reviewer for Markdown files. Open a Markdown file in a side-by-side rendered/source view, add line-anchored comments, then either save them to a `.review.yaml` sidecar or stream them back to a calling agent over a per-doc SSE channel.
 
-Designed for two workflows:
+Designed for these workflows:
 
-- **Human review** — read a doc, leave comments, reply, resolve, persist them next to the file.
-- **Agent-in-the-loop** — an AI assistant produces a Markdown artifact (plan, spec, PRD, design doc), opens it in mark-it for the user to comment on, then receives the comments back as structured text and revises the doc.
+- **Solo human review** — read a doc, leave comments, reply, resolve, persist them next to the file.
+- **Agent-in-the-loop** — an AI assistant produces a Markdown artifact (plan, spec, PRD, design doc), opens it in mark-it for the user to comment on, then receives the comments back as structured JSON and revises the doc.
+- **Multi-user review** — share an org/project workspace where multiple authenticated users can comment on a tree of documents, with comments persisted to a shared SQLite store and identity enforced server-side.
 
-Comments are stored in [Sidemark / MRSF](https://www.npmjs.com/package/@mrsf/cli) sidecar files (`<file>.review.yaml`) and re-anchor automatically when the underlying Markdown changes.
+Comments are stored either as YAML sidecars (`<file>.review.yaml`) next to the document or, in multi-user mode, in a local SQLite database keyed by org/project/document. Both backends use the [Sidemark / MRSF](https://www.npmjs.com/package/@mrsf/cli) format and re-anchor automatically when the underlying Markdown changes.
 
 ## Requirements
 
@@ -22,20 +23,37 @@ bun install
 
 ## Run
 
-From the workspace root:
+`mark-it` runs as a long-lived per-machine **daemon** that hosts many documents at once. Every `mark-it <path>` invocation is a thin client that registers the doc with the daemon (auto-spawning it the first time), focuses an existing tab if one is open, and exits in well under a second.
 
 ```sh
-# Open a file in the review UI (auto-opens browser)
+# Open a file. Spawns the daemon on first use; second invocation focuses the tab.
 bun mark-it path/to/doc.md
 
-# Pipe Markdown via stdin
+# Pipe Markdown via stdin — captured to a temp file, then registered.
 echo "# Hello" | bun mark-it
 
-# Custom port, no auto-open
-bun mark-it doc.md --port 4000 --no-open
+# No auto-open (the daemon still registers the doc; you can open it yourself).
+bun mark-it path/to/doc.md --no-open
 ```
 
-The CLI starts a local server, serves the document and its sidecar over a small HTTP API, and watches the file for changes (re-anchoring comments when it edits).
+The daemon advertises itself via `~/.mark-it/daemon.json` (mode 0600) with a randomly-bound localhost port and an HMAC token. It idle-exits when no docs are registered for ~10 minutes — set `MARK_IT_DAEMON_IDLE_SECS=0` to disable, or run `mark-it daemon --idle-secs <N>` directly to control the threshold.
+
+For pipelines that want a long-running server (e.g. the existing test suite), `mark-it review <path> --port <N>` keeps the legacy single-server-per-invocation behavior.
+
+### Multi-user mode
+
+For shared review across users (or across multiple documents in a project), use the DB-backed `review` subcommand:
+
+```sh
+# One-time setup
+mark-it org create acme
+mark-it user add @andreas --org acme --email andreas@example.com
+
+# Open a document under an org/project as a specific user
+mark-it review path/to/doc.md --org acme --project planning --user @andreas
+```
+
+In this mode the sidecar is persisted in `~/.mark-it/mark-it.db` (override with `--db <path>` or `MARK_IT_DB_PATH`), and the browser shows a left tree pane (org → projects → documents) for switching between documents in-place. Projects and document records are auto-created on first `review`. Every comment is tagged with the session user, and the server enforces that authors can only edit or reply as themselves.
 
 ## Use
 
@@ -44,13 +62,15 @@ In the browser:
 - **Select text** in the rendered or source view to start a new comment.
 - **Reply / edit / resolve / delete** from the comment sidebar.
 - **Toggle rendered / raw** view from the toolbar.
-- **Send to agent** — flushes outstanding comments to the calling process's stdout as structured text. The session stays open so the agent can apply edits and you can keep commenting; close the tab when you're done.
+- **Send to agent** — broadcasts outstanding comments on the per-doc Server-Sent Events channel (`/api/agent/events?doc=<id>`). Subscribers receive a structured `send` event with the comment payload and a monotonic event id; reconnects with `Last-Event-ID` replay missed events from a per-doc ring buffer (last 100). The session stays open so the agent can apply edits and you can keep commenting; close the tab when you're done.
 
-Comments persist in `<your-file>.md.review.yaml` next to the document.
+The bundled `mark-it tail <path>` subcommand subscribes to the SSE stream for that path's docId and prints one JSON envelope per Send to stdout — the canonical entry point for shell pipelines and the Claude Code skill.
+
+Comments persist in `<your-file>.md.review.yaml` next to the document, or in `~/.mark-it/mark-it.db` when running under `mark-it review --org/--project/--user`.
 
 ## Agent skill (Claude Code)
 
-The repo bundles a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills) at [`skills/review-with-mark-it/SKILL.md`](skills/review-with-mark-it/SKILL.md). When installed, Claude Code will offer to open substantial Markdown artifacts (plans, specs, PRDs, design docs) in `mark-it`, watch for **Send to agent** events on stdout, and apply each round of comments as targeted edits — looping until you close the browser tab.
+The repo bundles a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills) at [`skills/review-with-mark-it/SKILL.md`](skills/review-with-mark-it/SKILL.md). When installed, Claude Code will offer to open substantial Markdown artifacts (plans, specs, PRDs, design docs) in `mark-it`, watch each Send round as JSONL on `mark-it tail`'s stdout, and apply each round of comments as targeted edits — looping until you close the browser tab.
 
 ### Install
 
@@ -74,7 +94,10 @@ Once a session is active, keep adding comments and clicking **Send to agent**; C
 ## Project layout
 
 ```
-apps/cli                       # `mark-it` binary — Vite dev server + HTTP API + file watcher
+apps/cli                       # `mark-it` binary — citty CLI + Vite dev server + HTTP API
+apps/cli/src/daemon            # Daemon entry, discovery, auth, session registry
+apps/cli/src/plugins           # Vite plugins (one per /api/* namespace: document, sidecar, agent, …)
+apps/cli/src/commands          # citty subcommands: review, open, tail, daemon, org, user, project
 packages/core                  # Framework-agnostic store, sidecar IO, agent transports
 packages/react                 # React components: Document, Toolbar, CommentSidebar, SplitView, MarkItProvider
 skills/review-with-mark-it     # Bundled Claude Code skill that drives agent-in-the-loop review
