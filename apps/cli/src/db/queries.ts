@@ -107,6 +107,35 @@ export interface TreeNode {
 }
 
 export function loadTreeForOrg(db: Db, orgId: string): TreeNode {
-  // Body filled in Phase 4. For Phase 1 a stub returning { org, projects: [] } is sufficient.
-  throw new Error("loadTreeForOrg: implemented in Phase 4");
+  const org = findOrgById(db, orgId)!;
+  const projects = db.query<{ id: string; name: string }, [string]>(
+    "SELECT id, name FROM projects WHERE org_id = ? ORDER BY name"
+  ).all(orgId);
+  const docs = db.query<
+    { id: string; project_id: string; name: string; file_path: string },
+    [string]
+  >(
+    `SELECT d.id, d.project_id, d.name, d.file_path
+     FROM documents d
+     JOIN projects p ON p.id = d.project_id
+     WHERE p.org_id = ?
+     ORDER BY d.name`
+  ).all(orgId);
+
+  const docsByProject = new Map<string, typeof docs>();
+  for (const d of docs) {
+    const arr = docsByProject.get(d.project_id) ?? [];
+    arr.push(d);
+    docsByProject.set(d.project_id, arr);
+  }
+  return {
+    org: { id: org.id, name: org.name },
+    projects: projects.map((p) => ({
+      id: p.id,
+      name: p.name,
+      documents: (docsByProject.get(p.id) ?? []).map((d) => ({
+        id: d.id, name: d.name, file_path: d.file_path,
+      })),
+    })),
+  };
 }

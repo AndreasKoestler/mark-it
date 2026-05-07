@@ -17,6 +17,7 @@ import {
 import type { Db } from "./db/index.js";
 import { createActiveDocument, type ActiveDocument } from "./active-document.js";
 import { markItSessionPlugin } from "./plugins/session.js";
+import { markItTreePlugin } from "./plugins/tree.js";
 
 export interface Session {
   orgId: string;
@@ -90,6 +91,7 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
       markItSidecarPlugin(active, opts.session ?? null),
       markItEventsPlugin(lifecycle),
       markItSessionPlugin(active, opts.session ?? null, opts.db),
+      markItTreePlugin(opts.db, opts.session ?? null, active),
     ],
     define: {
       __MARK_IT_FILE_NAME__: JSON.stringify(basename(opts.initialActive.filePath)),

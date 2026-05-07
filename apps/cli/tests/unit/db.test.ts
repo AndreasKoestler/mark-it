@@ -15,6 +15,7 @@ import {
   findDocumentById,
   loadSidecarBlob,
   saveSidecarBlob,
+  loadTreeForOrg,
 } from "../../src/db/queries.js";
 import { migrationsDir } from "../../src/db/paths.js";
 
@@ -144,5 +145,76 @@ describe("documents", () => {
     db.run("DELETE FROM projects WHERE id = ?", [proj.id]);
     const docs = db.query("SELECT * FROM documents WHERE project_id = ?").all(proj.id);
     expect(docs).toHaveLength(0);
+  });
+});
+
+describe("loadTreeForOrg", () => {
+  test("returns org header and empty projects when none exist", () => {
+    const db = freshDb();
+    const org = createOrg(db, "acme");
+    const tree = loadTreeForOrg(db, org.id);
+    expect(tree.org.name).toBe("acme");
+    expect(tree.projects).toHaveLength(0);
+  });
+
+  test("returns projects with documents in alphabetical order", () => {
+    const db = freshDb();
+    const org = createOrg(db, "acme");
+    // Create projects out of order
+    const projB = upsertProject(db, org.id, "beta");
+    const projA = upsertProject(db, org.id, "alpha");
+    // Create docs out of order within projA
+    upsertDocument(db, projA.id, "/tmp/z.md", "z.md");
+    upsertDocument(db, projA.id, "/tmp/a.md", "a.md");
+    upsertDocument(db, projB.id, "/tmp/b.md", "b.md");
+
+    const tree = loadTreeForOrg(db, org.id);
+    expect(tree.org.name).toBe("acme");
+    // Projects alphabetically
+    expect(tree.projects).toHaveLength(2);
+    const [projAlpha, projBeta] = tree.projects;
+    expect(projAlpha!.name).toBe("alpha");
+    expect(projBeta!.name).toBe("beta");
+    // Docs within alpha alphabetically
+    expect(projAlpha!.documents).toHaveLength(2);
+    const [docA, docZ] = projAlpha!.documents;
+    expect(docA!.name).toBe("a.md");
+    expect(docZ!.name).toBe("z.md");
+    // Docs within beta
+    expect(projBeta!.documents).toHaveLength(1);
+    const [docB] = projBeta!.documents;
+    expect(docB!.name).toBe("b.md");
+  });
+
+  test("does not return documents from a different org", () => {
+    const db = freshDb();
+    const orgA = createOrg(db, "acme");
+    const orgB = createOrg(db, "other");
+    const projA = upsertProject(db, orgA.id, "p1");
+    const projB = upsertProject(db, orgB.id, "p2");
+    upsertDocument(db, projA.id, "/tmp/acme.md", "acme.md");
+    upsertDocument(db, projB.id, "/tmp/other.md", "other.md");
+
+    const treeA = loadTreeForOrg(db, orgA.id);
+    expect(treeA.projects).toHaveLength(1);
+    const [pA] = treeA.projects;
+    expect(pA!.documents).toHaveLength(1);
+    const [dA] = pA!.documents;
+    expect(dA!.name).toBe("acme.md");
+
+    const treeB = loadTreeForOrg(db, orgB.id);
+    expect(treeB.projects).toHaveLength(1);
+    const [pB] = treeB.projects;
+    const [dB] = pB!.documents;
+    expect(dB!.name).toBe("other.md");
+  });
+
+  test("projects with no documents return empty documents array", () => {
+    const db = freshDb();
+    const org = createOrg(db, "acme");
+    upsertProject(db, org.id, "empty-project");
+    const tree = loadTreeForOrg(db, org.id);
+    const [proj] = tree.projects;
+    expect(proj!.documents).toHaveLength(0);
   });
 });

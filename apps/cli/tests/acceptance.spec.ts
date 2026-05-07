@@ -66,6 +66,11 @@ async function submitDraft(page: Page, text: string) {
   await expect(page.locator('[data-testid="comment-draft"]')).toHaveCount(0);
 }
 
+test("AC0: legacy mode has no tree pane", async ({ page }) => {
+  await gotoApp(page);
+  await expect(page.locator(".mi-tree")).toHaveCount(0);
+});
+
 test("AC1: page loads with collapsed frontmatter (5)", async ({ page }) => {
   await gotoApp(page);
   const summary = page.locator(".mi-frontmatter-summary").first();

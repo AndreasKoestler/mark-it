@@ -5,9 +5,13 @@ import {
   Document,
   Toolbar,
   CommentSidebar,
+  SplitView,
+  TreePane,
   type CommentApi,
   type CommentAddInput,
   type CommentReplyInput,
+  type TreePayload,
+  type TreeDocument,
 } from "@mark-it/react";
 import "@mark-it/react/theme.css";
 import "@mrsf/rehype-mrsf/style.css";
@@ -59,20 +63,23 @@ function App() {
   const [docPayload, setDocPayload] = useState<DocumentPayload | null>(null);
   const [sidecar, setSidecar] = useState<MrsfDocument | null>(null);
   const [session, setSession] = useState<SessionPayload | null>(null);
+  const [tree, setTree] = useState<TreePayload | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     async function refresh() {
-      const [doc, sc, ss] = await Promise.all([
+      const [doc, sc, ss, tr] = await Promise.all([
         fetch("/api/document").then((r) => r.json() as Promise<DocumentPayload>),
         fetch("/api/sidecar").then((r) => r.json() as Promise<SidecarPayload>),
         fetch("/api/session").then((r) => r.json() as Promise<SessionPayload>),
+        fetch("/api/tree").then((r) => r.json() as Promise<TreePayload>),
       ]);
       if (cancelled) return;
       setDocPayload(doc);
       setSidecar(sc.doc);
       setSession(ss);
+      setTree(tr);
     }
     refresh().catch((e) => setError(String(e)));
 
@@ -97,6 +104,16 @@ function App() {
 
   const transports = useMemo(() => [new ClipboardTransport()], []);
 
+  async function selectDoc(d: TreeDocument) {
+    const res = await fetch("/api/document/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ documentId: d.id }),
+    });
+    if (!res.ok) throw new Error(`select failed: ${await res.text()}`);
+    // Server broadcasts SSE on success; the existing handler refreshes everything.
+  }
+
   if (error) {
     return (
       <div className="mi-root" style={{ padding: "1rem", color: "tomato" }}>
@@ -114,6 +131,8 @@ function App() {
 
   const author = session?.user?.handle ?? LEGACY_AUTHOR;
   const userId = session?.user?.id ?? null;
+  const activeDocumentId = session?.active?.documentId;
+  const isDbMode = session && !session.legacy && tree && !("legacy" in tree && (tree as { legacy?: boolean }).legacy);
 
   return (
     <div className="mi-root">
@@ -128,10 +147,21 @@ function App() {
         transports={transports}
       >
         <Toolbar />
-        <section className="mi-content">
-          <Document />
-          <CommentSidebar />
-        </section>
+        <SplitView
+          leftPane={
+            isDbMode && tree
+              ? (
+                <TreePane
+                  tree={tree}
+                  activeDocumentId={activeDocumentId}
+                  onSelectDocument={selectDoc}
+                />
+              )
+              : undefined
+          }
+          left={<Document />}
+          right={<CommentSidebar />}
+        />
       </MarkItProvider>
     </div>
   );

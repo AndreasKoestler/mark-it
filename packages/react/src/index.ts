@@ -19,3 +19,11 @@ export { Document } from "./Document.js";
 export { CommentSidebar } from "./CommentSidebar.js";
 export { Toolbar } from "./Toolbar.js";
 export { buildPipeline, type BuildPipelineOptions } from "./pipeline.js";
+export { SplitView, type SplitViewProps } from "./SplitView.js";
+export {
+  TreePane,
+  type TreePaneProps,
+  type TreePayload,
+  type TreeProject,
+  type TreeDocument,
+} from "./TreePane.js";
