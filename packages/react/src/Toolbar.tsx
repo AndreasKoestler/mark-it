@@ -26,7 +26,7 @@ export function Toolbar() {
     comments: Comment[],
     resolveAfter: boolean,
   ): AgentPayload => ({
-    document: { path: documentName, content: source },
+    document: { path: documentName },
     comments,
     intent,
     resolveIds: resolveAfter ? comments.map((c) => c.id) : [],

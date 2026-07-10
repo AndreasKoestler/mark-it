@@ -16,7 +16,15 @@ export const PERFECT_SCORE = 0.99;
  * handles those.
  */
 function stripLinePrefix(s: string): string {
-  return s.replace(/^\s*(?:[-*+]|\d+\.|>|#{1,6})\s+/, "");
+  // Strip compound prefixes (e.g. `> 1) item`) and accept both `1.` and `1)`
+  // ordered-list forms.
+  let out = s;
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(/^\s*(?:[-*+]|\d+[.)]|>|#{1,6})\s+/, "");
+  } while (out !== prev);
+  return out;
 }
 
 /**
@@ -43,6 +51,20 @@ function anchorPresentInSource(text: string | undefined, source: string): boolea
   // stripped; check against a stripped view of source so a freshly-added
   // comment on a line like `- **bold** stuff` isn't flagged as orphaned.
   return stripInlineMarkdown(source).includes(text);
+}
+
+/**
+ * True when `anchored_text` is a real re-anchor candidate (differs from
+ * `selected_text`) that's actually findable in `source` right now. The only
+ * place that decides "is this anchor live" — both the render projection
+ * below and the sidebar's drift badge must agree with this, or one can show
+ * a confident highlight while the other says the anchor is lost.
+ */
+export function anchoredTextIsLive(comment: Comment, source: string): boolean {
+  const ext = comment as Comment & { anchored_text?: string };
+  const anchored = ext.anchored_text;
+  if (!anchored || anchored === comment.selected_text) return false;
+  return source.includes(anchored);
 }
 
 /**
@@ -84,7 +106,7 @@ export function commentsForRender(doc: MrsfDocument, source?: string): MrsfDocum
       // means stale anchored_text and stale score can persist long after
       // the line they pointed at has been edited. Don't trust the metadata
       // unless it agrees with the current document.
-      const anchoredIsLive = source == null || source.includes(anchored);
+      const anchoredIsLive = source == null || anchoredTextIsLive(c, source);
       if (anchoredIsLive) {
         const isContentPerfect = score != null && score >= PERFECT_SCORE;
         // Perfect-score match: anchored differs only in formatting (source
@@ -143,6 +165,11 @@ export function commentsForRender(doc: MrsfDocument, source?: string): MrsfDocum
  * detect MRSF's "line/column fallback" case — it returns status="anchored"
  * even when the selected_text is gone, so neither `x_reanchor_status` nor
  * `anchored_text` get written. We have to spot it ourselves.
+ *
+ * Precondition: meaningful only for comments that carry anchor info
+ * (`selected_text` and/or `anchored_text`). A reply with neither is treated
+ * as orphaned by this function — callers that care about replies must guard
+ * (e.g. skip when `!comment.selected_text && !comment.line`).
  */
 export function isOrphanedAnchor(comment: Comment, source: string): boolean {
   const ext = comment as Comment & { anchored_text?: string };

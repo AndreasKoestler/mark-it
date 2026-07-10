@@ -17,7 +17,7 @@ export function RenderedView() {
     });
     const file = proc.processSync(source);
     return file.result as ReactElement;
-  }, [source, documentPath, revision]);
+  }, [source, documentPath, revision, doc]);
 
   useEffect(() => {
     if (!containerRef.current) return;

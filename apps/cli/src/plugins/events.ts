@@ -47,8 +47,17 @@ export function markItEventsPlugin(
       });
 
       server.middlewares.use("/api/events", (req, res) => {
+        if (req.method !== "GET") {
+          res.statusCode = 405;
+          res.end();
+          return;
+        }
         const r = resolveSession(req, registry);
-        const sess = "session" in r ? r.session : null;
+        if ("error" in r) {
+          json(res, r.status, { error: r.error });
+          return;
+        }
+        const sess = r.session;
 
         res.statusCode = 200;
         res.setHeader("Content-Type", "text/event-stream");
@@ -56,15 +65,13 @@ export function markItEventsPlugin(
         res.setHeader("Connection", "keep-alive");
         res.write("event: ready\ndata: {}\n\n");
 
-        if (sess) {
-          sess.lifecycleClients.add(res);
-          lifecycle.onDocConnect?.(sess.docId);
-        }
+        sess.lifecycleClients.add(res);
+        lifecycle.onDocConnect?.(sess.docId);
         if (lifecycle.globalClients) lifecycle.globalClients.add(res);
         lifecycle.onConnect?.();
 
         req.on("close", () => {
-          if (sess) sess.lifecycleClients.delete(res);
+          sess.lifecycleClients.delete(res);
           if (lifecycle.globalClients) lifecycle.globalClients.delete(res);
         });
       });

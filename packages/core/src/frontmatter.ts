@@ -9,23 +9,54 @@ export interface FrontmatterSplit {
   lineCount: number;
 }
 
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 const TOP_LEVEL_KEY_RE = /^[A-Za-z_][\w-]*\s*:/gm;
 
+/**
+ * Split leading YAML frontmatter from a Markdown source.
+ *
+ * Closing fence is the first line that is exactly `---` (no leading
+ * whitespace). Mid-line `---` inside a value does not close the block; a
+ * value that is itself a lone `---` line still will (ambiguous with the
+ * fence — quote such values).
+ */
 export function splitFrontmatter(source: string): FrontmatterSplit {
-  const match = source.match(FRONTMATTER_RE);
-  if (!match) {
+  if (!source.startsWith("---\n") && !source.startsWith("---\r\n")) {
     return { yaml: null, body: source, keyCount: 0, lineCount: 0 };
   }
-  const [whole, yaml] = match;
-  const keyCount = (yaml!.match(TOP_LEVEL_KEY_RE) ?? []).length;
-  const lineCount = whole.split(/\r?\n/).length - (whole.endsWith("\n") ? 1 : 0);
-  return {
-    yaml: yaml!,
-    body: source.slice(whole.length),
-    keyCount,
-    lineCount,
-  };
+
+  const lines = source.split(/\r?\n/);
+  // lines[0] is "---"
+  let closeIdx = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === "---") {
+      closeIdx = i;
+      break;
+    }
+  }
+  if (closeIdx === -1) {
+    return { yaml: null, body: source, keyCount: 0, lineCount: 0 };
+  }
+
+  const yaml = lines.slice(1, closeIdx).join("\n");
+  const keyCount = (yaml.match(TOP_LEVEL_KEY_RE) ?? []).length;
+  const lineCount = closeIdx + 1; // opening + yaml lines + closing
+
+  // Reconstruct body from original source so CRLF/LF is preserved.
+  // Find the byte offset of the end of the closing fence line.
+  let offset = 0;
+  let lineNo = 0;
+  while (lineNo <= closeIdx && offset < source.length) {
+    const nextNl = source.indexOf("\n", offset);
+    if (nextNl === -1) {
+      offset = source.length;
+      break;
+    }
+    offset = nextNl + 1;
+    lineNo += 1;
+  }
+  const body = source.slice(offset);
+
+  return { yaml, body, keyCount, lineCount };
 }
 
 export function countYamlKeys(yaml: string): number {

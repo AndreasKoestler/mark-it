@@ -26,7 +26,6 @@ export const tailCommand = defineCommand({
   },
   async run({ args }) {
     const docId = await resolveDocId(args);
-    const info = await ensureDaemonRunning();
 
     let lastEventId: string | undefined;
     const reconnectDelays = [250, 500, 1_000, 2_000, 4_000];
@@ -34,6 +33,9 @@ export const tailCommand = defineCommand({
 
     while (true) {
       try {
+        // Re-resolve on every attempt so a daemon restart (new port/token)
+        // doesn't wedge the reconnect loop forever.
+        const info = await ensureDaemonRunning();
         const exited = await runOnce(info, docId, lastEventId, (id) => {
           lastEventId = id;
         });

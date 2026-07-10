@@ -32,6 +32,34 @@ async function waitForServer(url: string, timeoutMs = 30_000): Promise<void> {
   throw new Error(`Server at ${url} did not become ready within ${timeoutMs}ms`);
 }
 
+/**
+ * A session-bearing `startServer` run generates a random auth token and
+ * prints `mark-it: token=<token>` to stderr (see server.ts). Buffers stderr
+ * from spawn time so the line isn't missed if it arrives before this is
+ * called.
+ */
+function watchForToken(child: ChildProcess): () => Promise<string> {
+  let buf = "";
+  child.stderr?.on("data", (c: Buffer) => (buf += c.toString()));
+  return (timeoutMs = 25_000) =>
+    new Promise((resolveToken, reject) => {
+      const deadline = Date.now() + timeoutMs;
+      const poll = () => {
+        const m = buf.match(/mark-it: token=([0-9a-f]+)/);
+        if (m) {
+          resolveToken(m[1]!);
+          return;
+        }
+        if (Date.now() > deadline) {
+          reject(new Error(`token not seen on stderr within ${timeoutMs}ms (got: ${buf})`));
+          return;
+        }
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
+}
+
 async function seedDb(dbPath: string): Promise<{ orgId: string; docBId: string; p1Id: string; p2Id: string }> {
   const { Database: BunDb } = await import("bun:sqlite");
   const db = new BunDb(dbPath, { create: true });
@@ -63,6 +91,7 @@ async function seedDb(dbPath: string): Promise<{ orgId: string; docBId: string; 
 let server: ChildProcess;
 let dbPath: string;
 let docBId: string;
+let token: string;
 
 test.beforeAll(async () => {
   const tmp = mkdtempSync(join(tmpdir(), "mi-tree-"));
@@ -93,8 +122,10 @@ test.beforeAll(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const getToken = watchForToken(server);
 
   await waitForServer(`http://localhost:${TREE_PORT}/api/session`);
+  token = await getToken();
 });
 
 test.afterAll(() => {
@@ -102,7 +133,7 @@ test.afterAll(() => {
 });
 
 async function gotoApp(page: Page) {
-  await page.goto(`http://localhost:${TREE_PORT}/`);
+  await page.goto(`http://localhost:${TREE_PORT}/?token=${token}`);
   await page.waitForSelector("[data-mrsf-line]", { timeout: 15_000 });
 }
 
@@ -180,7 +211,7 @@ test("TREE3: clicking doc-b switches active doc in-place (no page reload)", asyn
   await expect(activeBtn).toContainText("doc-b.md");
 
   // URL bar should NOT have changed (still no hash/path change)
-  expect(page.url()).toBe(`http://localhost:${TREE_PORT}/`);
+  expect(page.url()).toBe(`http://localhost:${TREE_PORT}/?token=${token}`);
 });
 
 test("TREE4: comment added after switch persists to the new doc's sidecar_yaml", async ({ page }) => {
@@ -238,7 +269,9 @@ test("TREE4: comment added after switch persists to the new doc's sidecar_yaml",
 });
 
 test("TREE5: /api/tree returns tree annotated with isActive", async () => {
-  const res = await fetch(`http://localhost:${TREE_PORT}/api/tree`);
+  const res = await fetch(`http://localhost:${TREE_PORT}/api/tree`, {
+    headers: { "X-Mark-It-Token": token },
+  });
   expect(res.status).toBe(200);
   const tree = await res.json() as {
     org: { name: string };
@@ -255,4 +288,54 @@ test("TREE5: /api/tree returns tree annotated with isActive", async () => {
   // The active doc must be either plan.md (initial) or doc-b.md (if TREE3/4 switched)
   const [activeDoc] = activeDocs;
   expect(["plan.md", "doc-b.md"]).toContain(activeDoc!.name);
+});
+
+test("TREE6: a slow superseded refresh doesn't clobber a faster later doc switch", async ({ page }) => {
+  await gotoApp(page);
+
+  // Delay the FIRST /api/document response (triggered by switching to doc-b)
+  // well past the second switch's response, so if the client applied
+  // whichever /api/document response arrived last (instead of whichever
+  // refresh() was started last), doc-b's stale content would win.
+  let delayedOnce = false;
+  await page.route(
+    (url) => url.pathname === "/api/document",
+    async (route) => {
+      if (!delayedOnce) {
+        delayedOnce = true;
+        await new Promise((r) => setTimeout(r, 1_000));
+      }
+      await route.continue();
+    },
+  );
+
+  // Other tests in this file share the same server session, so p1/p2's
+  // open/closed state and the currently-active doc both depend on whatever
+  // ran before — open each project only if it isn't already.
+  const p1Details = page.locator(".mi-tree-project").filter({ hasText: "p1" });
+  const p2Details = page.locator(".mi-tree-project").filter({ hasText: "p2" });
+  if ((await p2Details.getAttribute("open")) === null) {
+    await p2Details.locator(".mi-tree-project-summary").click();
+  }
+
+  // Switch to doc-b — its refresh() will hang on the delayed /api/document.
+  await p2Details.locator(".mi-tree-doc").filter({ hasText: "doc-b.md" }).click();
+  // Give the select POST + SSE broadcast + refresh() start time to land
+  // (well under the 1s delay) before firing the second, undelayed switch.
+  await page.waitForTimeout(200);
+
+  // Switch back to plan.md — this refresh() is not delayed and should win.
+  if ((await p1Details.getAttribute("open")) === null) {
+    await p1Details.locator(".mi-tree-project-summary").click();
+  }
+  await p1Details.locator(".mi-tree-doc").filter({ hasText: "plan.md" }).click();
+
+  // Wait past the first switch's artificial delay.
+  await page.waitForTimeout(1_200);
+
+  await expect(page.locator(".mi-rendered h1, .mi-raw-line").first()).not.toContainText(
+    /Doc B Heading/,
+  );
+  const activeBtn = page.locator(".mi-tree-doc[data-active]");
+  await expect(activeBtn).toContainText("plan.md");
 });

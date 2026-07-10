@@ -20,14 +20,19 @@ const KNOWN_SUBCOMMANDS = new Set([
 
 /**
  * Bare-file fallback: `mark-it foo.md` opens via the daemon (thin client).
- * If the first arg isn't a known subcommand, prepend "open" so citty
- * routes accordingly.
+ * If no known subcommand appears before the first non-flag arg, prepend
+ * "open" so citty routes accordingly — including leading flags like
+ * `mark-it --no-open foo.md`.
  */
 function preprocessArgv(argv: string[]): string[] {
-  const first = argv[0];
-  if (!first) return argv;
-  if (first.startsWith("-")) return argv;
-  if (KNOWN_SUBCOMMANDS.has(first)) return argv;
+  if (argv.length === 0) return argv;
+  for (const arg of argv) {
+    if (arg.startsWith("-")) continue;
+    if (KNOWN_SUBCOMMANDS.has(arg)) return argv;
+    // First positional is a file path (or similar) → default to open.
+    return ["open", ...argv];
+  }
+  // Flags only (e.g. `mark-it --no-open` with stdin) → still open.
   return ["open", ...argv];
 }
 

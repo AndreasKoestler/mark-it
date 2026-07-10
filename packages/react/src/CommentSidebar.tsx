@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   formatForAgent,
   isOrphanedAnchor,
+  anchoredTextIsLive,
   MRSF_HIGH_THRESHOLD,
   PERFECT_SCORE,
   type AgentPayload,
@@ -112,7 +113,7 @@ function ThreadCard({
   onEditSubmit,
   onEditCancel,
 }: ThreadCardProps) {
-  const { transports, documentName, source } = useMarkIt();
+  const { transports, documentName } = useMarkIt();
   const actions = useStoreActions();
   const [replyText, setReplyText] = useState("");
   const trimmed = replyText.trim();
@@ -131,7 +132,7 @@ function ThreadCard({
   const threadIds = threadComments.map((c) => c.id);
 
   const buildPayload = (resolveAfter: boolean): AgentPayload => ({
-    document: { path: documentName, content: source },
+    document: { path: documentName },
     comments: threadComments,
     intent: "single",
     resolveIds: resolveAfter ? threadIds : [],
@@ -158,10 +159,11 @@ function ThreadCard({
 
   const onDeleteThread = () => actions.deleteComment(thread.root.id, { cascade: true });
 
+  const replyIdsKey = thread.replies.map((r) => r.id).join(",");
   useEffect(() => {
     const ids = new Set<string>([
       thread.root.id,
-      ...thread.replies.map((r) => r.id),
+      ...(replyIdsKey ? replyIdsKey.split(",") : []),
     ]);
     function onReplyFocus(e: Event) {
       const detail = (e as CustomEvent<{ commentId: string }>).detail;
@@ -181,7 +183,7 @@ function ThreadCard({
       document.removeEventListener("markit:reply-focus", onReplyFocus);
       document.removeEventListener("markit:edit-focus", onEditFocus);
     };
-  }, [thread.root.id, thread.replies]);
+  }, [thread.root.id, replyIdsKey]);
 
   return (
     <li
@@ -257,7 +259,7 @@ function ThreadCard({
           type="text"
           className="mi-reply-input"
           data-testid="thread-reply-input"
-          placeholder={`Reply as ${author.split(" (")[0]}…`}
+          placeholder={`Reply as ${authorName(author)}…`}
           value={replyText}
           onChange={(e) => setReplyText(e.target.value)}
         />
@@ -355,7 +357,11 @@ function driftInfo(comment: Comment, source: string): DriftInfo {
     !!comment.selected_text &&
     isOrphanedAnchor(comment, source);
 
-  const lowScore = score != null && score < MRSF_HIGH_THRESHOLD;
+  // A low score only means "anchor lost" if there's no live anchor to show —
+  // otherwise the render path (commentsForRender) projects a confident
+  // highlight at anchored_text, and this badge would contradict it.
+  const lowScore =
+    score != null && score < MRSF_HIGH_THRESHOLD && !anchoredTextIsLive(comment, source);
   if (status === "orphaned" || looksOrphaned || lowScore) {
     // If MRSF still gave us a best-effort anchor, surface it. The badge says
     // "anchor lost" (low confidence), the "now anchors to" block shows MRSF's
@@ -387,6 +393,7 @@ function driftInfo(comment: Comment, source: string): DriftInfo {
   return { kind: null, badge: null, title: "", anchoredText: null };
 }
 
+/** Display name from `Handle (id)` / `Handle(id)` / bare handle. */
 function authorName(raw: string): string {
   const m = /^(.*?)\s*\(/.exec(raw);
   return (m?.[1] ?? raw).trim();

@@ -163,13 +163,16 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
       markItRegistryPlugin({
         registry,
         db: opts.db,
-        defaultSession: null,
         origin: () => originHolder.value,
         token,
         bumpActivity: () => lifecycle.bump(),
+        // Re-register within the bye-grace window must cancel the pending
+        // unregister — otherwise a fast open→close→open race drops the new
+        // session ~3s later.
+        onRegister: cancelUnregister,
       }),
       markItDocumentPlugin(registry),
-      markItSidecarPlugin(registry, null),
+      markItSidecarPlugin(registry),
       markItEventsPlugin(registry, {
         onConnect: () => lifecycle.bump(),
         onDocConnect: cancelUnregister,
@@ -179,8 +182,8 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
       // (events.onDocConnect). Tail learns the session is over via `done`.
       markItAgentStreamPlugin(registry),
       markItAgentPlugin(registry),
-      markItSessionPlugin(registry, null, opts.db),
-      markItTreePlugin(opts.db, null, registry),
+      markItSessionPlugin(registry, opts.db),
+      markItTreePlugin(opts.db, registry),
     ],
     define: {
       __MARK_IT_FILE_NAME__: JSON.stringify("(daemon)"),
@@ -196,7 +199,10 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
 
   await discovery.write({ port, token, pid: process.pid });
 
+  let shuttingDown = false;
   const onSignal = async (sig: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.error(`mark-it daemon: received ${sig}, shutting down`);
     await discovery.clear();
     for (const sess of registry.all()) {

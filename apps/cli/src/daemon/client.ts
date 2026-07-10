@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { createDiscovery, type DaemonInfo } from "./discovery.js";
-import type { ActiveDocumentSpec } from "../server.js";
+import type { ActiveDocumentSpec, Session } from "../server.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const CLI_ENTRY = resolve(dirname(__filename), "..", "index.ts");
@@ -13,6 +13,12 @@ export interface RegisterResult {
   focused: boolean;
 }
 
+/** Prefer the current runtime when it's Bun; fall back to `bun` on PATH. */
+function daemonRuntime(): string {
+  if (typeof process.versions.bun === "string") return process.execPath;
+  return process.env.MARK_IT_BUN ?? "bun";
+}
+
 /**
  * Returns a live `DaemonInfo` for the current MARK_IT_HOME, spawning the
  * daemon and waiting for it to come up if necessary. Single-flight via the
@@ -21,6 +27,8 @@ export interface RegisterResult {
 export async function ensureDaemonRunning(opts: {
   spawnTimeoutMs?: number;
   idleSecs?: number;
+  /** Forwarded as `--db` when spawning a fresh daemon (multi-user mode). */
+  dbPath?: string;
 } = {}): Promise<DaemonInfo> {
   const discovery = createDiscovery();
   const existing = await discovery.read();
@@ -36,8 +44,13 @@ export async function ensureDaemonRunning(opts: {
   }
 
   try {
+    // Re-check after lock — another client may have finished spawning.
+    const raced = await discovery.read();
+    if (raced) return raced;
+
+    const runtime = daemonRuntime();
     const child = spawn(
-      "bun",
+      runtime,
       [
         CLI_ENTRY,
         "daemon",
@@ -47,6 +60,7 @@ export async function ensureDaemonRunning(opts: {
         "127.0.0.1",
         "--idle-secs",
         String(opts.idleSecs ?? 600),
+        ...(opts.dbPath ? ["--db", opts.dbPath] : []),
       ],
       {
         env: { ...process.env },
@@ -55,6 +69,11 @@ export async function ensureDaemonRunning(opts: {
         stdio: ["ignore", "ignore", "ignore"],
       },
     );
+    child.on("error", (err) => {
+      console.error(
+        `mark-it: failed to spawn daemon via ${runtime}: ${err.message}`,
+      );
+    });
     child.unref();
     return await waitForDaemonFile(discovery, opts.spawnTimeoutMs ?? 10_000);
   } finally {
@@ -79,7 +98,7 @@ async function waitForDaemonFile(
 
 export async function registerDoc(
   info: DaemonInfo,
-  spec: ActiveDocumentSpec,
+  spec: ActiveDocumentSpec & { session?: Session | null },
 ): Promise<RegisterResult> {
   const res = await fetch(`http://127.0.0.1:${info.port}/api/registry/register`, {
     method: "POST",

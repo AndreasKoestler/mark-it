@@ -39,11 +39,17 @@ export class HttpAgentTransport implements AgentTransport {
       comments: payload.comments,
       resolveIds: payload.resolveIds ?? [],
     });
-    const res = await this.fetchImpl(this.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...this.headers },
-      body,
-    });
+    let res: Response;
+    try {
+      res = await this.fetchImpl(this.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...this.headers },
+        body,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`HttpAgentTransport(${this.url}) network error: ${reason}`);
+    }
     if (!res.ok) {
       const msg = await res.text().catch(() => "");
       throw new Error(`HttpAgentTransport(${this.url}) failed: ${res.status} ${msg}`);
