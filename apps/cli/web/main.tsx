@@ -62,7 +62,7 @@ interface SessionPayload {
   };
 }
 
-const LEGACY_AUTHOR = "Andreas Koestler (andreas@example.com)";
+const LEGACY_AUTHOR = "Anonymous";
 
 async function postSidecar(action: string, payload: unknown): Promise<MrsfDocument> {
   const res = await fetch(withParams("/api/sidecar"), {

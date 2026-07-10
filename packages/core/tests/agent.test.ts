@@ -5,7 +5,7 @@ import type { Comment } from "../src/sidemark.js";
 
 const baseComment = (over: Partial<Comment>): Comment => ({
   id: "c1",
-  author: "Andreas Koestler (andreas@example.com)",
+  author: "Ada Lovelace (ada@example.com)",
   timestamp: "2026-05-06T12:00:00Z",
   text: "Looks good.",
   resolved: false,
@@ -29,7 +29,7 @@ describe("formatForAgent", () => {
       "Document: docs/plan.md
 
       Comment 1 (line 12) — \"Empty repository ready for scaffolding\":
-        Andreas Koestler (andreas@example.com) — 2026-05-06T12:00:00Z
+        Ada Lovelace (ada@example.com) — 2026-05-06T12:00:00Z
         > Confirm scaffolding includes Vitest config.
       "
     `);
@@ -46,7 +46,7 @@ describe("formatForAgent", () => {
       intent: "all",
     });
     expect(out).toContain("Comment 1 (line 10)");
-    expect(out).toContain("↳ Andreas Koestler");
+    expect(out).toContain("↳ Ada Lovelace");
     expect(out).toContain("Reply A");
     expect(out).toContain("Comment 2 (line 20)");
     expect(out.indexOf("Reply A")).toBeLessThan(out.indexOf("Comment 2"));

@@ -4,7 +4,7 @@ A reviewer for Markdown files. Open a Markdown file in a side-by-side rendered/s
 
 Designed for these workflows:
 
-- **Solo human review** — read a doc, leave comments, reply, resolve, persist them next to the file.
+- **Human review** — read a doc, leave comments, reply, resolve, persist them next to the file.
 - **Agent-in-the-loop** — an AI assistant produces a Markdown artifact (plan, spec, PRD, design doc), opens it in mark-it for the user to comment on, then receives the comments back as structured JSON and revises the doc.
 - **Multi-user review** — share an org/project workspace where multiple authenticated users can comment on a tree of documents, with comments persisted to a shared SQLite store and identity enforced server-side.
 
@@ -12,8 +12,11 @@ Comments are stored either as YAML sidecars (`<file>.review.yaml`) next to the d
 
 ## Requirements
 
-- [Bun](https://bun.sh) ≥ 1.1
-- Node 20+ (only needed if you want to run the built CLI without Bun)
+- [Bun](https://bun.sh) ≥ 1.1 — runs the CLI and the bundled Vite dev server. Bun also ships the `bun:sqlite` driver used by multi-user mode.
+- A modern browser (any current Chromium-, Firefox- or WebKit-based one) — the review UI runs there.
+- Node 20+ — only if you want to run the built CLI without Bun.
+- [Claude Code](https://docs.claude.com/en/docs/claude-code) — only if you want the bundled agent-in-the-loop skill (see "Agent skill" below).
+- macOS, Linux, or Windows — no platform-specific dependencies; the daemon binds to `127.0.0.1` and discovery uses a JSON file under your home directory.
 
 ## Install
 
@@ -111,3 +114,7 @@ bun run build       # build all @mark-it/* packages
 bun run test        # unit tests (vitest)
 bun run test:e2e    # Playwright acceptance tests against the CLI
 ```
+
+
+
+

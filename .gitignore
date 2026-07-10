@@ -4,9 +4,11 @@ dist/
 .DS_Store
 *.log
 .vite/
+*.review.yaml
 *.review.yaml.bak
 playwright-report/
 test-results/
+.playwright-cli/
 
 # Riptide artifacts (cloud-synced)
 .humanlayer/tasks/
