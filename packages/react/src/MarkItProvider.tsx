@@ -231,10 +231,15 @@ function MrsfBridge(): null {
           const endLine = Number(ds.mrsfEndLine ?? line);
           // Prefer the user's text selection if any; otherwise the rendered
           // text of the target block (matches what the rehype-mrsf inline
-          // highlighter searches for).
-          const block = document.querySelector<HTMLElement>(
-            `[data-mrsf-line="${line}"]`,
-          );
+          // highlighter searches for). Nested blocks (table/blockquote) can
+          // share a line number — pick the deepest match, not the first.
+          const blocks = [
+            ...document.querySelectorAll<HTMLElement>(`[data-mrsf-line="${line}"]`),
+          ];
+          const block =
+            blocks.find(
+              (el) => !blocks.some((other) => other !== el && el.contains(other)),
+            ) ?? blocks[0];
           const renderedText = block?.textContent?.trim() ?? null;
           document.dispatchEvent(
             new CustomEvent("mrsf:add", {

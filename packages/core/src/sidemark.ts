@@ -16,7 +16,15 @@ export const PERFECT_SCORE = 0.99;
  * handles those.
  */
 function stripLinePrefix(s: string): string {
-  return s.replace(/^\s*(?:[-*+]|\d+\.|>|#{1,6})\s+/, "");
+  // Strip compound prefixes (e.g. `> 1) item`) and accept both `1.` and `1)`
+  // ordered-list forms.
+  let out = s;
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(/^\s*(?:[-*+]|\d+[.)]|>|#{1,6})\s+/, "");
+  } while (out !== prev);
+  return out;
 }
 
 /**
@@ -157,6 +165,11 @@ export function commentsForRender(doc: MrsfDocument, source?: string): MrsfDocum
  * detect MRSF's "line/column fallback" case — it returns status="anchored"
  * even when the selected_text is gone, so neither `x_reanchor_status` nor
  * `anchored_text` get written. We have to spot it ourselves.
+ *
+ * Precondition: meaningful only for comments that carry anchor info
+ * (`selected_text` and/or `anchored_text`). A reply with neither is treated
+ * as orphaned by this function — callers that care about replies must guard
+ * (e.g. skip when `!comment.selected_text && !comment.line`).
  */
 export function isOrphanedAnchor(comment: Comment, source: string): boolean {
   const ext = comment as Comment & { anchored_text?: string };

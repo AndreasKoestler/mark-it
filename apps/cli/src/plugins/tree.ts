@@ -21,23 +21,27 @@ export function markItTreePlugin(db: Db | undefined, registry: SessionRegistry):
           res.end();
           return;
         }
-        const r = resolveSession(req, registry);
-        const session = "error" in r ? null : r.session.session;
-        if (!db || !session) {
-          json(res, 200, { legacy: true, projects: [] });
-          return;
+        try {
+          const r = resolveSession(req, registry);
+          const session = "error" in r ? null : r.session.session;
+          if (!db || !session) {
+            json(res, 200, { legacy: true, projects: [] });
+            return;
+          }
+          const tree = loadTreeForOrg(db, session.orgId);
+          const activeId =
+            "session" in r ? r.session.spec.documentId : undefined;
+          const annotated = {
+            ...tree,
+            projects: tree.projects.map((p) => ({
+              ...p,
+              documents: p.documents.map((d) => ({ ...d, isActive: d.id === activeId })),
+            })),
+          };
+          json(res, 200, annotated);
+        } catch (err) {
+          json(res, 500, { error: String(err) });
         }
-        const tree = loadTreeForOrg(db, session.orgId);
-        const activeId =
-          "session" in r ? r.session.spec.documentId : undefined;
-        const annotated = {
-          ...tree,
-          projects: tree.projects.map((p) => ({
-            ...p,
-            documents: p.documents.map((d) => ({ ...d, isActive: d.id === activeId })),
-          })),
-        };
-        json(res, 200, annotated);
       });
     },
   };

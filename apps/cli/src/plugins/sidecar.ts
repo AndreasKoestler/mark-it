@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { relative } from "node:path";
 import type { Plugin } from "vite";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { ServerResponse } from "node:http";
 import {
   addComment,
   editComment,
@@ -10,21 +10,52 @@ import {
   removeComment,
   type MrsfDocument,
   type AddCommentOptions,
+  type Comment,
 } from "@mrsf/cli";
 import type { SessionRegistry, DocSession } from "../daemon/sessions.js";
 import { resolveSession, type Session } from "../server.js";
+import { readJson } from "../util/read-json.js";
 
 class IdentityError extends Error {}
 
-function enforceIdentity(
+const SIDECAR_ACTIONS = [
+  "add",
+  "reply",
+  "edit",
+  "resolve",
+  "unresolve",
+  "delete",
+  "resolveAll",
+] as const;
+
+type SidecarAction = (typeof SIDECAR_ACTIONS)[number];
+
+/** Actions that require the request payload's author/actor to match the session. */
+const AUTHOR_MATCH_ACTIONS = new Set<SidecarAction>(["add", "reply", "edit"]);
+
+/** Actions that require the target comment to be owned by the session user. */
+const OWNERSHIP_ACTIONS = new Set<SidecarAction>([
+  "edit",
+  "resolve",
+  "unresolve",
+  "delete",
+]);
+
+function parseSidecarAction(raw: unknown): SidecarAction {
+  if (typeof raw === "string" && (SIDECAR_ACTIONS as readonly string[]).includes(raw)) {
+    return raw as SidecarAction;
+  }
+  throw new Error(`Unknown action: ${String(raw)}`);
+}
+
+function enforceAuthorMatch(
   session: Session | null,
-  action: string,
+  action: SidecarAction,
   payload: unknown,
 ): void {
   if (!session) return;
   if (process.env.MARK_IT_ALLOW_AUTHOR_OVERRIDE === "1") return;
-  const writeActions = new Set(["add", "reply", "edit"]);
-  if (!writeActions.has(action)) return;
+  if (!AUTHOR_MATCH_ACTIONS.has(action)) return;
   const p = payload as { author?: string; actor?: string; x_user_id?: string };
   const author = p.author ?? p.actor;
   if (author !== session.userHandle || p.x_user_id !== session.userId) {
@@ -32,18 +63,30 @@ function enforceIdentity(
   }
 }
 
+function enforceCommentOwnership(
+  session: Session | null,
+  action: SidecarAction,
+  comment: Comment | undefined,
+): void {
+  if (!session) return;
+  if (process.env.MARK_IT_ALLOW_AUTHOR_OVERRIDE === "1") return;
+  if (!OWNERSHIP_ACTIONS.has(action)) return;
+  if (!comment) return;
+  const ext = comment as Comment & { x_user_id?: string };
+  if (ext.author !== session.userHandle || ext.x_user_id !== session.userId) {
+    throw new IdentityError(`403: cannot ${action} another user's comment`);
+  }
+}
+
+function ownsComment(session: Session, comment: Comment): boolean {
+  const ext = comment as Comment & { x_user_id?: string };
+  return ext.author === session.userHandle && ext.x_user_id === session.userId;
+}
+
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
-}
-
-async function readJson<T>(req: IncomingMessage): Promise<T> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
 }
 
 export function markItSidecarPlugin(registry: SessionRegistry): Plugin {
@@ -84,12 +127,13 @@ export function markItSidecarPlugin(registry: SessionRegistry): Plugin {
 
         if (req.method === "POST") {
           try {
-            const body = await readJson<{ action: string; payload?: unknown }>(req);
+            const body = await readJson<{ action: unknown; payload?: unknown }>(req);
+            const action = parseSidecarAction(body.action);
             const updated = await sess.withWriteLock(async () => {
               const doc = await loadDoc(sess);
               const result = await applyAction(
                 doc,
-                body.action,
+                action,
                 body.payload,
                 sess.spec.filePath,
                 sess.session,
@@ -117,12 +161,12 @@ export function markItSidecarPlugin(registry: SessionRegistry): Plugin {
 
 async function applyAction(
   doc: MrsfDocument,
-  action: string,
+  action: SidecarAction,
   payload: unknown,
   filePath: string,
   session: Session | null,
 ): Promise<MrsfDocument> {
-  enforceIdentity(session, action, payload);
+  enforceAuthorMatch(session, action, payload);
   switch (action) {
     case "add": {
       const p = payload as Partial<AddCommentOptions> & {
@@ -138,19 +182,22 @@ async function applyAction(
       };
       await addComment(doc, opts);
       const last = doc.comments[doc.comments.length - 1];
-      if (last && p.selected_text) {
-        last.selected_text = p.selected_text;
-      }
-      if (last && !last.selected_text && p.line) {
+      if (last && p.line) {
         const docContent = await readFile(filePath, "utf8");
         const lines = docContent.split(/\r?\n/);
         const startIdx = (p.line ?? 1) - 1;
         const endIdx = (p.end_line ?? p.line ?? 1) - 1;
         const slice = lines.slice(startIdx, endIdx + 1).join("\n");
-        if (slice) last.selected_text = slice;
+        // Only accept client-supplied selected_text when it actually occurs
+        // at (or within) the stated line range; otherwise derive from source.
+        if (p.selected_text && slice.includes(p.selected_text)) {
+          last.selected_text = p.selected_text;
+        } else if (slice) {
+          last.selected_text = slice;
+        }
       }
       if (last && p.x_user_id) {
-        (last as { x_user_id?: string } & typeof last).x_user_id = p.x_user_id;
+        (last as Comment & { x_user_id?: string }).x_user_id = p.x_user_id;
       }
       return doc;
     }
@@ -175,7 +222,7 @@ async function applyAction(
       });
       const lastReply = doc.comments[doc.comments.length - 1];
       if (lastReply && p.x_user_id) {
-        (lastReply as { x_user_id?: string } & typeof lastReply).x_user_id = p.x_user_id;
+        (lastReply as Comment & { x_user_id?: string }).x_user_id = p.x_user_id;
       }
       return doc;
     }
@@ -189,11 +236,13 @@ async function applyAction(
       if (!p?.commentId || !p.text) {
         throw new Error("edit: commentId and text are required");
       }
+      const target = doc.comments.find((c) => c.id === p.commentId);
+      enforceCommentOwnership(session, action, target);
       editComment(doc, p.commentId, { text: p.text, actor: p.actor });
       if (p.x_user_id) {
-        const target = doc.comments.find((c) => c.id === p.commentId);
-        if (target) {
-          (target as { x_user_id?: string } & typeof target).x_user_id = p.x_user_id;
+        const after = doc.comments.find((c) => c.id === p.commentId);
+        if (after) {
+          (after as Comment & { x_user_id?: string }).x_user_id = p.x_user_id;
         }
       }
       return doc;
@@ -201,6 +250,8 @@ async function applyAction(
     case "resolve": {
       const p = payload as { commentId?: string };
       if (!p?.commentId) throw new Error("resolve: commentId required");
+      const target = doc.comments.find((c) => c.id === p.commentId);
+      enforceCommentOwnership(session, action, target);
       if (!resolveComment(doc, p.commentId)) {
         throw new Error(`resolve: ${p.commentId} not found`);
       }
@@ -209,6 +260,8 @@ async function applyAction(
     case "unresolve": {
       const p = payload as { commentId?: string };
       if (!p?.commentId) throw new Error("unresolve: commentId required");
+      const target = doc.comments.find((c) => c.id === p.commentId);
+      enforceCommentOwnership(session, action, target);
       if (!unresolveComment(doc, p.commentId)) {
         throw new Error(`unresolve: ${p.commentId} not found`);
       }
@@ -217,16 +270,22 @@ async function applyAction(
     case "delete": {
       const p = payload as { commentId?: string; cascade?: boolean };
       if (!p?.commentId) throw new Error("delete: commentId required");
+      const target = doc.comments.find((c) => c.id === p.commentId);
+      enforceCommentOwnership(session, action, target);
       if (!removeComment(doc, p.commentId, { cascade: p.cascade ?? false })) {
         throw new Error(`delete: ${p.commentId} not found`);
       }
       return doc;
     }
     case "resolveAll": {
-      for (const c of doc.comments) c.resolved = true;
+      if (session && process.env.MARK_IT_ALLOW_AUTHOR_OVERRIDE !== "1") {
+        for (const c of doc.comments) {
+          if (ownsComment(session, c)) c.resolved = true;
+        }
+      } else {
+        for (const c of doc.comments) c.resolved = true;
+      }
       return doc;
     }
-    default:
-      throw new Error(`Unknown action: ${action}`);
   }
 }

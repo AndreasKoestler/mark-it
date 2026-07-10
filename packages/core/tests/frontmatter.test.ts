@@ -31,6 +31,13 @@ describe("splitFrontmatter", () => {
     expect(out.keyCount).toBe(2);
     expect(out.body).toBe("body\r\n");
   });
+
+  it("does not close early on a mid-line --- inside a value", () => {
+    const src = "---\ntitle: hello --- world\n---\n# Body\n";
+    const out = splitFrontmatter(src);
+    expect(out.yaml).toBe("title: hello --- world");
+    expect(out.body).toBe("# Body\n");
+  });
 });
 
 describe("countYamlKeys", () => {

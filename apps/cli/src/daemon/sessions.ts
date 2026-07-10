@@ -49,11 +49,16 @@ function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+/** Hard cap on concurrent registered docs (one chokidar watcher each). */
+export const MAX_REGISTERED_DOCS = 64;
+
 export function createSessionRegistry(deps: {
   broadcast: (docId: string, event: string) => void;
+  maxDocs?: number;
 }): SessionRegistry {
   const sessions = new Map<string, DocSession>();
   let active: string | undefined;
+  const maxDocs = deps.maxDocs ?? MAX_REGISTERED_DOCS;
 
   function makeStore(
     s: ActiveDocumentSpec,
@@ -176,6 +181,11 @@ export function createSessionRegistry(deps: {
       if (existing) {
         active = docId;
         return existing;
+      }
+      if (sessions.size >= maxDocs) {
+        throw new Error(
+          `mark-it: too many open documents (max ${maxDocs}) — close some tabs first`,
+        );
       }
       const sess = build(spec, ext);
       sessions.set(docId, sess);

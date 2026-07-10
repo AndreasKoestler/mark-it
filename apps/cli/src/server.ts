@@ -208,7 +208,11 @@ function openBrowser(url: string): void {
     process.platform === "darwin" ? "open" :
     process.platform === "win32" ? "start" :
     "xdg-open";
-  spawn(cmd, [url], { stdio: "ignore", detached: true }).unref();
+  const child = spawn(cmd, [url], { stdio: "ignore", detached: true });
+  child.on("error", (err) => {
+    console.error(`mark-it: failed to open browser (${cmd}): ${err.message}`);
+  });
+  child.unref();
 }
 
 export { docIdForSpec };

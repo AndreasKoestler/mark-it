@@ -1,24 +1,16 @@
 import { basename } from "node:path";
 import type { Plugin } from "vite";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { ServerResponse } from "node:http";
 import type { SessionRegistry } from "../daemon/sessions.js";
 import { resolveSession } from "../server.js";
 import type { Db } from "../db/index.js";
 import { findDocumentById } from "../db/queries.js";
+import { readJson } from "../util/read-json.js";
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
-}
-
-async function readJson<T>(req: IncomingMessage): Promise<T> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  }
-  const raw = Buffer.concat(chunks).toString("utf8");
-  return JSON.parse(raw) as T;
 }
 
 export function markItSessionPlugin(registry: SessionRegistry, db?: Db): Plugin {

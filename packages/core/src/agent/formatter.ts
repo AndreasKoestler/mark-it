@@ -19,15 +19,19 @@ export function formatForAgent(payload: AgentPayload): string {
   lines.push(`Document: ${document.path}`);
   lines.push("");
 
+  const ids = new Set(comments.map((c) => c.id));
   const byParent = new Map<string, Comment[]>();
   for (const c of comments) {
-    if (c.reply_to) {
+    // Only nest under a parent that is also in this batch — otherwise the
+    // reply would vanish (resolved root + open reply is a common case).
+    if (c.reply_to && ids.has(c.reply_to)) {
       const list = byParent.get(c.reply_to) ?? [];
       list.push(c);
       byParent.set(c.reply_to, list);
     }
   }
-  const roots = comments.filter((c) => !c.reply_to);
+  // Promote dangling replies (parent filtered out of this array) to roots.
+  const roots = comments.filter((c) => !c.reply_to || !ids.has(c.reply_to));
 
   roots.forEach((c, idx) => {
     const lineRef = c.line ? ` (line ${c.line})` : "";

@@ -166,6 +166,10 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
         origin: () => originHolder.value,
         token,
         bumpActivity: () => lifecycle.bump(),
+        // Re-register within the bye-grace window must cancel the pending
+        // unregister — otherwise a fast open→close→open race drops the new
+        // session ~3s later.
+        onRegister: cancelUnregister,
       }),
       markItDocumentPlugin(registry),
       markItSidecarPlugin(registry),
@@ -195,7 +199,10 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
 
   await discovery.write({ port, token, pid: process.pid });
 
+  let shuttingDown = false;
   const onSignal = async (sig: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.error(`mark-it daemon: received ${sig}, shutting down`);
     await discovery.clear();
     for (const sess of registry.all()) {

@@ -1,9 +1,11 @@
 import type { Plugin } from "vite";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { ServerResponse } from "node:http";
 import type { SessionRegistry } from "../daemon/sessions.js";
 import type { Db } from "../db/index.js";
 import type { ActiveDocumentSpec, Session } from "../server.js";
 import { docIdForSpec } from "../daemon/ids.js";
+import { findDocumentById } from "../db/queries.js";
+import { readJson } from "../util/read-json.js";
 
 interface RegistryDeps {
   registry: SessionRegistry;
@@ -14,6 +16,8 @@ interface RegistryDeps {
   token: string;
   /** Called when client activity should reset the daemon's idle timer. */
   bumpActivity?: () => void;
+  /** Called when a doc is registered/re-registered (e.g. cancel bye-grace). */
+  onRegister?: (docId: string) => void;
 }
 
 interface RegisterRequestBody extends ActiveDocumentSpec {
@@ -27,12 +31,30 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-async function readJson<T>(req: IncomingMessage): Promise<T> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+/**
+ * When a session is present, documentId/projectId must belong to that
+ * session's org. Prevents a holder of the loopback token from registering
+ * an arbitrary foreign document id under someone else's identity.
+ */
+function assertSpecOwnedBySession(
+  db: Db,
+  session: Session,
+  spec: ActiveDocumentSpec,
+): void {
+  if (!spec.documentId) return;
+  const doc = findDocumentById(db, spec.documentId);
+  if (!doc) {
+    throw new Error(`document not found: ${spec.documentId}`);
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
+  const project = db
+    .query<{ org_id: string }, [string]>("SELECT org_id FROM projects WHERE id = ?")
+    .get(doc.project_id);
+  if (!project || project.org_id !== session.orgId) {
+    throw new Error("403: document not in session org");
+  }
+  if (spec.projectId && spec.projectId !== doc.project_id) {
+    throw new Error("403: projectId does not match document");
+  }
 }
 
 export function markItRegistryPlugin(deps: RegistryDeps): Plugin {
@@ -81,6 +103,16 @@ export function markItRegistryPlugin(deps: RegistryDeps): Plugin {
             });
             return;
           }
+          if (session && deps.db) {
+            try {
+              assertSpecOwnedBySession(deps.db, session, spec);
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              const status = msg.startsWith("403:") ? 403 : 404;
+              json(res, status, { error: msg });
+              return;
+            }
+          }
           const newId = docIdForSpec(spec);
           const wasRegistered = deps.registry.get(newId) !== undefined;
           const sess = deps.registry.register(spec, {
@@ -88,6 +120,7 @@ export function markItRegistryPlugin(deps: RegistryDeps): Plugin {
             session: session ?? null,
           });
           deps.registry.setActive(sess.docId);
+          deps.onRegister?.(sess.docId);
 
           if (wasRegistered) {
             // Tell any open tab on this doc to come to the front.
@@ -95,6 +128,11 @@ export function markItRegistryPlugin(deps: RegistryDeps): Plugin {
           }
 
           deps.bumpActivity?.();
+          // Token rides the query string so the first browser navigation can
+          // authenticate (EventSource cannot set headers). History exposure is
+          // accepted for loopback-only tokens; fragment would break server-side
+          // redirects that need the token on subsequent same-origin fetches
+          // until the SPA rewrites the URL.
           const url = `${deps.origin()}/?doc=${encodeURIComponent(sess.docId)}&token=${encodeURIComponent(deps.token)}`;
           json(res, 200, { docId: sess.docId, url, focused: wasRegistered });
         } catch (err) {

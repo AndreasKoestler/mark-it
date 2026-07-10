@@ -1,7 +1,11 @@
 import type { Comment } from "../sidemark.js";
 
 export interface AgentPayload {
-  /** Path of the document being reviewed (relative when known). */
+  /**
+   * Path of the document being reviewed (relative when known).
+   * `content` is intentionally unused by current transports/formatters —
+   * kept optional for forward-compat callers that still attach it.
+   */
   document: { path: string; content?: string };
   /** Comments to send. Replies appear after their parents in input order. */
   comments: Comment[];

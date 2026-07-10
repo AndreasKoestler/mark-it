@@ -62,6 +62,22 @@ describe("formatForAgent", () => {
     expect(out).toMatch(/^Comment 1 \(line 1\):$/m);
   });
 
+  it("promotes a reply whose parent is absent from the batch to a root (does not drop it)", () => {
+    const out = formatForAgent({
+      document: { path: "doc.md" },
+      comments: [
+        baseComment({
+          id: "orphan-reply",
+          reply_to: "missing-parent",
+          text: "Still need this in the agent prompt.",
+        }),
+      ],
+      intent: "all",
+    });
+    expect(out).toContain("Still need this in the agent prompt.");
+    expect(out).toContain("Comment 1");
+  });
+
   it("degrades a comment with missing text to an empty line instead of throwing, and still renders the rest of the batch", () => {
     // The sidecar YAML this data comes from is openly user-editable — a
     // hand-edited file can omit `text` despite Comment's type saying it's

@@ -20,6 +20,14 @@ export function markItDocumentPlugin(registry: SessionRegistry): Plugin {
           next();
           return;
         }
+        // Connect prefix-matches `/api/document/select` onto this mount.
+        // Only handle the exact document resource (path remainder empty or
+        // query-only); anything else falls through to more specific routes.
+        const pathOnly = (req.url ?? "").split("?")[0];
+        if (pathOnly && pathOnly !== "/" && pathOnly !== "") {
+          next();
+          return;
+        }
         const r = resolveSession(req, registry);
         if ("error" in r) {
           json(res, r.status, { error: r.error });

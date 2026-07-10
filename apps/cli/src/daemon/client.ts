@@ -13,6 +13,12 @@ export interface RegisterResult {
   focused: boolean;
 }
 
+/** Prefer the current runtime when it's Bun; fall back to `bun` on PATH. */
+function daemonRuntime(): string {
+  if (typeof process.versions.bun === "string") return process.execPath;
+  return process.env.MARK_IT_BUN ?? "bun";
+}
+
 /**
  * Returns a live `DaemonInfo` for the current MARK_IT_HOME, spawning the
  * daemon and waiting for it to come up if necessary. Single-flight via the
@@ -38,8 +44,13 @@ export async function ensureDaemonRunning(opts: {
   }
 
   try {
+    // Re-check after lock — another client may have finished spawning.
+    const raced = await discovery.read();
+    if (raced) return raced;
+
+    const runtime = daemonRuntime();
     const child = spawn(
-      "bun",
+      runtime,
       [
         CLI_ENTRY,
         "daemon",
@@ -58,6 +69,11 @@ export async function ensureDaemonRunning(opts: {
         stdio: ["ignore", "ignore", "ignore"],
       },
     );
+    child.on("error", (err) => {
+      console.error(
+        `mark-it: failed to spawn daemon via ${runtime}: ${err.message}`,
+      );
+    });
     child.unref();
     return await waitForDaemonFile(discovery, opts.spawnTimeoutMs ?? 10_000);
   } finally {

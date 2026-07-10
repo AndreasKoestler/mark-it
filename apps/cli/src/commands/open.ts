@@ -59,15 +59,21 @@ export const openCommand = defineCommand({
     // invocation resolved the org/project/document against — otherwise the
     // daemon has no DB to persist into and comments silently fall back to
     // disk despite --org/--project/--user.
-    const info = await ensureDaemonRunning({ dbPath });
-    const result = await registerDoc(info, {
-      filePath,
-      documentId,
-      documentName,
-      projectId,
-      projectName,
-      session,
-    });
+    let result;
+    try {
+      const info = await ensureDaemonRunning({ dbPath });
+      result = await registerDoc(info, {
+        filePath,
+        documentId,
+        documentName,
+        projectId,
+        projectName,
+        session,
+      });
+    } catch (err) {
+      console.error(`mark-it: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
 
     // Print the docId to stdout so shell pipelines / mark-it tail can pick it up.
     process.stdout.write(`${result.docId}\n`);
@@ -107,5 +113,9 @@ function openBrowser(url: string): void {
     process.platform === "darwin" ? "open" :
     process.platform === "win32" ? "start" :
     "xdg-open";
-  spawn(cmd, [url], { stdio: "ignore", detached: true }).unref();
+  const child = spawn(cmd, [url], { stdio: "ignore", detached: true });
+  child.on("error", (err) => {
+    console.error(`mark-it: failed to open browser (${cmd}): ${err.message}`);
+  });
+  child.unref();
 }
