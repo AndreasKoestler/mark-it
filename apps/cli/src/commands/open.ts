@@ -1,11 +1,11 @@
 import { defineCommand } from "citty";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { ensureDaemonRunning, registerDoc } from "../daemon/client.js";
-import { openDbForCommand, requireOrg, normaliseHandle } from "./util.js";
-import { findUserByHandle, upsertProject, upsertDocument } from "../db/queries.js";
+import { openDbForCommand, resolveDbBackedDoc } from "./util.js";
+import type { Session } from "../server.js";
 
 export const openCommand = defineCommand({
   meta: {
@@ -37,32 +37,36 @@ export const openCommand = defineCommand({
     let documentName: string | undefined;
     let projectId: string | undefined;
     let projectName: string | undefined;
+    let session: Session | undefined;
+    let dbPath: string | undefined;
 
     if (args.org && args.project && args.user) {
-      const { db } = openDbForCommand({ db: args.db });
-      const org = requireOrg(db, args.org);
-      const handle = normaliseHandle(args.user);
-      const user = findUserByHandle(db, org.id, handle);
-      if (!user) {
-        console.error(`mark-it: user ${handle} is not a member of org ${org.name}`);
-        process.exit(1);
-      }
-      const project = upsertProject(db, org.id, args.project);
-      const docName = args["doc-name"] ?? basename(filePath);
-      const document = upsertDocument(db, project.id, filePath, docName);
-      documentId = document.id;
-      documentName = document.name;
-      projectId = project.id;
-      projectName = project.name;
+      const opened = openDbForCommand({ db: args.db });
+      dbPath = opened.dbPath;
+      const resolved = resolveDbBackedDoc(
+        opened.db,
+        { org: args.org, project: args.project, user: args.user, "doc-name": args["doc-name"] },
+        filePath,
+      );
+      documentId = resolved.documentId;
+      documentName = resolved.documentName;
+      projectId = resolved.projectId;
+      projectName = resolved.projectName;
+      session = resolved.session;
     }
 
-    const info = await ensureDaemonRunning();
+    // Forward --db so a freshly-spawned daemon opens the same database this
+    // invocation resolved the org/project/document against — otherwise the
+    // daemon has no DB to persist into and comments silently fall back to
+    // disk despite --org/--project/--user.
+    const info = await ensureDaemonRunning({ dbPath });
     const result = await registerDoc(info, {
       filePath,
       documentId,
       documentName,
       projectId,
       projectName,
+      session,
     });
 
     // Print the docId to stdout so shell pipelines / mark-it tail can pick it up.

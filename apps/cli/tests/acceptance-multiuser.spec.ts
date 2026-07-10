@@ -34,6 +34,34 @@ async function waitForServer(url: string, timeoutMs = 25_000): Promise<void> {
   throw new Error(`Server at ${url} did not become ready within ${timeoutMs}ms`);
 }
 
+/**
+ * A session-bearing `startServer` run generates a random auth token and
+ * prints `mark-it: token=<token>` to stderr (see server.ts). Buffers stderr
+ * from spawn time so the line isn't missed if it arrives before this is
+ * called.
+ */
+function watchForToken(child: ChildProcess): () => Promise<string> {
+  let buf = "";
+  child.stderr?.on("data", (c: Buffer) => (buf += c.toString()));
+  return (timeoutMs = 25_000) =>
+    new Promise((resolveToken, reject) => {
+      const deadline = Date.now() + timeoutMs;
+      const poll = () => {
+        const m = buf.match(/mark-it: token=([0-9a-f]+)/);
+        if (m) {
+          resolveToken(m[1]!);
+          return;
+        }
+        if (Date.now() > deadline) {
+          reject(new Error(`token not seen on stderr within ${timeoutMs}ms (got: ${buf})`));
+          return;
+        }
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
+}
+
 async function seedDb(dbPath: string): Promise<void> {
   const { Database: BunDb } = await import("bun:sqlite");
   const db = new BunDb(dbPath, { create: true });
@@ -50,6 +78,7 @@ async function seedDb(dbPath: string): Promise<void> {
 
 let server: ChildProcess;
 let dbPath: string;
+let token: string;
 
 test.beforeAll(async () => {
   const tmp = mkdtempSync(join(tmpdir(), "mi-multiuser-"));
@@ -79,8 +108,10 @@ test.beforeAll(async () => {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const getToken = watchForToken(server);
 
   await waitForServer(`http://localhost:${MULTIUSER_PORT}/api/session`);
+  token = await getToken();
 });
 
 test.afterAll(() => {
@@ -88,7 +119,7 @@ test.afterAll(() => {
 });
 
 async function gotoApp(page: Page) {
-  await page.goto(`http://localhost:${MULTIUSER_PORT}/`);
+  await page.goto(`http://localhost:${MULTIUSER_PORT}/?token=${token}`);
   await page.waitForSelector("[data-mrsf-line]");
 }
 
@@ -150,7 +181,9 @@ test("DB mode: stored YAML contains x_user_id", async ({ page }) => {
   await page.waitForTimeout(300);
 
   // Fetch session to get the user ID
-  const sessionRes = await fetch(`http://localhost:${MULTIUSER_PORT}/api/session`);
+  const sessionRes = await fetch(`http://localhost:${MULTIUSER_PORT}/api/session`, {
+    headers: { "X-Mark-It-Token": token },
+  });
   const session = (await sessionRes.json()) as { user?: { id: string } };
   const userId = session.user?.id;
   expect(userId).toBeTruthy();

@@ -13,11 +13,18 @@ import type { ServerResponse } from "node:http";
 export interface DocSession {
   docId: string;
   spec: ActiveDocumentSpec;
+  session: Session | null;
   sidecar: SidecarStore;
   agentBuffer: EventBuffer;
   agentSseClients: Set<ServerResponse>;
   lifecycleClients: Set<ServerResponse>;
   ensureFreshAnchors(): Promise<void>;
+  /**
+   * Runs `fn` after any previously-queued write for this doc has settled, so
+   * every sidecar load-mutate-save cycle is serialized instead of racing on
+   * stale in-memory state. Every mutation path must go through this.
+   */
+  withWriteLock<T>(fn: () => Promise<T>): Promise<T>;
   pushAgentEvent(env: EventEnvelope): void;
   dispose(): Promise<void>;
 }
@@ -63,12 +70,26 @@ export function createSessionRegistry(deps: {
     ext?: { db?: Db; session?: Session | null },
   ): DocSession {
     const docId = docIdForSpec(spec);
+    const session = ext?.session ?? null;
     const sidecar = makeStore(spec, ext);
     const agentBuffer = createEventBuffer({ capacity: 100 });
     const agentSseClients = new Set<ServerResponse>();
     const lifecycleClients = new Set<ServerResponse>();
     let lastAnchoredHash: string | undefined;
     let inflight: Promise<void> | null = null;
+    let writeQueue: Promise<unknown> = Promise.resolve();
+
+    function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+      const result = writeQueue.then(fn, fn);
+      // Chain the queue on a version that always resolves, so one failed
+      // write doesn't wedge every write queued after it — callers still see
+      // the real outcome via `result`.
+      writeQueue = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    }
 
     async function ensureFreshAnchors(): Promise<void> {
       if (inflight) return inflight;
@@ -82,12 +103,14 @@ export function createSessionRegistry(deps: {
           }
           const h = hashContent(content);
           if (h === lastAnchoredHash) return;
-          const doc = await sidecar.load();
-          if (Array.isArray(doc.comments) && doc.comments.length > 0) {
-            const results = await reanchorDocumentText(doc, content);
-            applyReanchorResults(doc, results);
-            await sidecar.save(doc);
-          }
+          await withWriteLock(async () => {
+            const doc = await sidecar.load();
+            if (Array.isArray(doc.comments) && doc.comments.length > 0) {
+              const results = await reanchorDocumentText(doc, content);
+              applyReanchorResults(doc, results);
+              await sidecar.save(doc);
+            }
+          });
           lastAnchoredHash = h;
         } catch (err) {
           console.error(`mark-it[${docId}]: re-anchor failed:`, err);
@@ -122,11 +145,13 @@ export function createSessionRegistry(deps: {
     return {
       docId,
       spec,
+      session,
       sidecar,
       agentBuffer,
       agentSseClients,
       lifecycleClients,
       ensureFreshAnchors,
+      withWriteLock,
       pushAgentEvent(env) {
         agentBuffer.push(env);
       },

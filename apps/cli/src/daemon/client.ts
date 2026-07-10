@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { createDiscovery, type DaemonInfo } from "./discovery.js";
-import type { ActiveDocumentSpec } from "../server.js";
+import type { ActiveDocumentSpec, Session } from "../server.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const CLI_ENTRY = resolve(dirname(__filename), "..", "index.ts");
@@ -21,6 +21,8 @@ export interface RegisterResult {
 export async function ensureDaemonRunning(opts: {
   spawnTimeoutMs?: number;
   idleSecs?: number;
+  /** Forwarded as `--db` when spawning a fresh daemon (multi-user mode). */
+  dbPath?: string;
 } = {}): Promise<DaemonInfo> {
   const discovery = createDiscovery();
   const existing = await discovery.read();
@@ -47,6 +49,7 @@ export async function ensureDaemonRunning(opts: {
         "127.0.0.1",
         "--idle-secs",
         String(opts.idleSecs ?? 600),
+        ...(opts.dbPath ? ["--db", opts.dbPath] : []),
       ],
       {
         env: { ...process.env },
@@ -79,7 +82,7 @@ async function waitForDaemonFile(
 
 export async function registerDoc(
   info: DaemonInfo,
-  spec: ActiveDocumentSpec,
+  spec: ActiveDocumentSpec & { session?: Session | null },
 ): Promise<RegisterResult> {
   const res = await fetch(`http://127.0.0.1:${info.port}/api/registry/register`, {
     method: "POST",

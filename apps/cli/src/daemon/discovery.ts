@@ -1,7 +1,12 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { rename, writeFile, readFile, chmod, mkdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+
+// A spawn that's taken this long either crashed mid-spawn (leaving the lock
+// dir behind with nothing left to release it) or is stuck; either way it's
+// safe to reclaim rather than wedge every future `mark-it` invocation.
+const STALE_LOCK_MS = 30_000;
 
 export interface DaemonInfo {
   port: number;
@@ -28,6 +33,28 @@ export function createDiscovery(opts: { home?: string } = {}): Discovery {
       process.kill(pid, 0);
       return true;
     } catch {
+      return false;
+    }
+  }
+
+  const lockPidFile = join(lock, "pid");
+
+  function lockIsStale(): boolean {
+    let ageMs: number;
+    try {
+      ageMs = Date.now() - statSync(lock).mtimeMs;
+    } catch {
+      // Lock vanished between mkdirSync failing and now (released
+      // concurrently) — not stale, just gone; the retry below will succeed.
+      return true;
+    }
+    if (ageMs > STALE_LOCK_MS) return true;
+    try {
+      const pid = Number(readFileSync(lockPidFile, "utf8"));
+      return Number.isFinite(pid) && !alive(pid);
+    } catch {
+      // No pid recorded yet — the holder crashed between mkdirSync and
+      // writing it, or this lock predates pid-recording. Fall back to age.
       return false;
     }
   }
@@ -64,7 +91,17 @@ export function createDiscovery(opts: { home?: string } = {}): Discovery {
 
     async acquireSpawnLock() {
       await mkdir(dir, { recursive: true });
-      mkdirSync(lock); // throws EEXIST if held
+      try {
+        mkdirSync(lock); // throws EEXIST if held
+      } catch (err) {
+        if (!lockIsStale()) throw err;
+        // Reclaim: the previous holder is dead or this has been held far
+        // longer than any real daemon spawn takes. If another process reclaims
+        // it first, the retry below throws and that process just waits instead.
+        rmSync(lock, { recursive: true, force: true });
+        mkdirSync(lock);
+      }
+      writeFileSync(lockPidFile, String(process.pid), "utf8");
       return () => rmSync(lock, { recursive: true, force: true });
     },
   };

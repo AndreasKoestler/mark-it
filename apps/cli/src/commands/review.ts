@@ -1,10 +1,9 @@
 import { defineCommand } from "citty";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { startServer } from "../server.js";
-import { openDbForCommand, requireOrg, normaliseHandle } from "./util.js";
-import { findUserByHandle, upsertProject, upsertDocument } from "../db/queries.js";
+import { openDbForCommand, resolveDbBackedDoc } from "./util.js";
 
 export const reviewCommand = defineCommand({
   meta: { name: "review", description: "Open a Markdown file in mark-it's review UI." },
@@ -42,33 +41,23 @@ export const reviewCommand = defineCommand({
     }
 
     const { db } = openDbForCommand({ db: args.db });
-    const org = requireOrg(db, args.org!);
-    const handle = normaliseHandle(args.user!);
-    const user = findUserByHandle(db, org.id, handle);
-    if (!user) {
-      console.error(`mark-it: user ${handle} is not a member of org ${org.name}`);
-      process.exit(1);
-    }
-    const project = upsertProject(db, org.id, args.project!);
-    const docName = args["doc-name"] ?? basename(filePath);
-    const document = upsertDocument(db, project.id, filePath, docName);
+    const resolved = resolveDbBackedDoc(
+      db,
+      { org: args.org!, project: args.project!, user: args.user!, "doc-name": args["doc-name"] },
+      filePath,
+    );
 
     await startServer({
       port,
       open,
       db,
-      session: {
-        orgId: org.id,
-        orgName: org.name,
-        userId: user.id,
-        userHandle: user.handle,
-      },
+      session: resolved.session,
       initialActive: {
         filePath,
-        documentId: document.id,
-        documentName: document.name,
-        projectId: project.id,
-        projectName: project.name,
+        documentId: resolved.documentId,
+        documentName: resolved.documentName,
+        projectId: resolved.projectId,
+        projectName: resolved.projectName,
       },
     });
   },

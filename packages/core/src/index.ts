@@ -10,6 +10,7 @@ export {
   emptyDocument,
   commentsForRender,
   isOrphanedAnchor,
+  anchoredTextIsLive,
   PERFECT_SCORE,
   MRSF_HIGH_THRESHOLD,
   type MrsfDocument,

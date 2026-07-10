@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   formatForAgent,
   isOrphanedAnchor,
+  anchoredTextIsLive,
   MRSF_HIGH_THRESHOLD,
   PERFECT_SCORE,
   type AgentPayload,
@@ -355,7 +356,11 @@ function driftInfo(comment: Comment, source: string): DriftInfo {
     !!comment.selected_text &&
     isOrphanedAnchor(comment, source);
 
-  const lowScore = score != null && score < MRSF_HIGH_THRESHOLD;
+  // A low score only means "anchor lost" if there's no live anchor to show —
+  // otherwise the render path (commentsForRender) projects a confident
+  // highlight at anchored_text, and this badge would contradict it.
+  const lowScore =
+    score != null && score < MRSF_HIGH_THRESHOLD && !anchoredTextIsLive(comment, source);
   if (status === "orphaned" || looksOrphaned || lowScore) {
     // If MRSF still gave us a best-effort anchor, surface it. The badge says
     // "anchor lost" (low confidence), the "now anchors to" block shows MRSF's

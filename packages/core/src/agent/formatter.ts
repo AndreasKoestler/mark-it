@@ -1,6 +1,14 @@
 import type { AgentPayload } from "./transport.js";
 import type { Comment } from "../sidemark.js";
 
+// The sidecar YAML this data ultimately comes from is an openly user-editable
+// file — `text` can be missing or non-string despite Comment's type saying
+// otherwise. Coerce defensively so one malformed comment degrades to an
+// empty line instead of throwing and aborting the whole batch.
+function textLines(text: unknown): string[] {
+  return (typeof text === "string" ? text : "").split("\n");
+}
+
 /**
  * Render an AgentPayload as a structured plain-text prompt suitable for any
  * agent (clipboard, webhook, CLI). Format is the contract for all transports.
@@ -26,13 +34,13 @@ export function formatForAgent(payload: AgentPayload): string {
     const anchor = c.selected_text ? ` — "${c.selected_text}"` : "";
     lines.push(`Comment ${idx + 1}${lineRef}${anchor}:`);
     lines.push(`  ${c.author} — ${c.timestamp}`);
-    for (const tline of c.text.split("\n")) {
+    for (const tline of textLines(c.text)) {
       lines.push(`  > ${tline}`);
     }
     const replies = byParent.get(c.id) ?? [];
     for (const r of replies) {
       lines.push(`  ↳ ${r.author} — ${r.timestamp}`);
-      for (const tline of r.text.split("\n")) {
+      for (const tline of textLines(r.text)) {
         lines.push(`    > ${tline}`);
       }
     }

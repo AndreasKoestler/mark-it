@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
 import type { MrsfDocument } from "@mrsf/cli";
-import { parseSidecar, writeSidecar } from "@mrsf/cli";
+import { parseSidecarLenient, writeSidecar } from "@mrsf/cli";
 import { saveSidecarBlob, loadSidecarBlob } from "../db/queries.js";
 import type { Db } from "../db/index.js";
 
@@ -17,9 +17,20 @@ export class DiskSidecarStore implements SidecarStore {
     if (!existsSync(this.sidecarPath)) {
       return { mrsf_version: "1.0", document: this.filePath, comments: [] };
     }
-    const parsed = await parseSidecar(this.sidecarPath);
-    if (!Array.isArray(parsed.comments)) parsed.comments = [];
-    return parsed;
+    const result = await parseSidecarLenient(this.sidecarPath);
+    if (result.doc) {
+      if (!Array.isArray(result.doc.comments)) result.doc.comments = [];
+      return result.doc;
+    }
+    // Corrupt/unparseable YAML — salvage whatever comments we can rather
+    // than failing the whole document; the user can still see and fix the
+    // underlying file, but at least the review session stays usable.
+    console.error(`mark-it: sidecar at ${this.sidecarPath} failed to parse: ${result.error}`);
+    return {
+      mrsf_version: "1.0",
+      document: this.filePath,
+      comments: result.partialComments ?? [],
+    };
   }
 
   async save(doc: MrsfDocument): Promise<void> {

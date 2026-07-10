@@ -46,10 +46,7 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
 }
 
-export function markItSidecarPlugin(
-  registry: SessionRegistry,
-  session: Session | null,
-): Plugin {
+export function markItSidecarPlugin(registry: SessionRegistry): Plugin {
   return {
     name: "mark-it-sidecar",
     configureServer(server) {
@@ -88,15 +85,18 @@ export function markItSidecarPlugin(
         if (req.method === "POST") {
           try {
             const body = await readJson<{ action: string; payload?: unknown }>(req);
-            const doc = await loadDoc(sess);
-            const updated = await applyAction(
-              doc,
-              body.action,
-              body.payload,
-              sess.spec.filePath,
-              session,
-            );
-            await sess.sidecar.save(updated);
+            const updated = await sess.withWriteLock(async () => {
+              const doc = await loadDoc(sess);
+              const result = await applyAction(
+                doc,
+                body.action,
+                body.payload,
+                sess.spec.filePath,
+                sess.session,
+              );
+              await sess.sidecar.save(result);
+              return result;
+            });
             const sidecarPath = `${sess.spec.filePath}.review.yaml`;
             json(res, 200, { doc: updated, sidecarPath });
           } catch (err) {

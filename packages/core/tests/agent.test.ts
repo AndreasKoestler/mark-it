@@ -61,6 +61,28 @@ describe("formatForAgent", () => {
     // Header line ends after `(line 1):` — no anchor `— "..."` segment.
     expect(out).toMatch(/^Comment 1 \(line 1\):$/m);
   });
+
+  it("degrades a comment with missing text to an empty line instead of throwing, and still renders the rest of the batch", () => {
+    // The sidecar YAML this data comes from is openly user-editable — a
+    // hand-edited file can omit `text` despite Comment's type saying it's
+    // required. One malformed comment must not abort the whole batch.
+    const malformed = baseComment({ line: 3 });
+    delete (malformed as { text?: string }).text;
+    const good = baseComment({ id: "c2", line: 7, text: "Still readable." });
+
+    expect(() =>
+      formatForAgent({ document: { path: "doc.md" }, comments: [malformed, good], intent: "all" }),
+    ).not.toThrow();
+
+    const out = formatForAgent({
+      document: { path: "doc.md" },
+      comments: [malformed, good],
+      intent: "all",
+    });
+    expect(out).toContain("Comment 1 (line 3)");
+    expect(out).toContain("Comment 2 (line 7)");
+    expect(out).toContain("Still readable.");
+  });
 });
 
 describe("ClipboardTransport", () => {

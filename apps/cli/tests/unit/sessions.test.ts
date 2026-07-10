@@ -60,6 +60,44 @@ comments:
     }
   });
 
+  test("withWriteLock serializes overlapping load-mutate-save cycles so neither write is lost", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mark-it-sess-"));
+    try {
+      const file = join(dir, "doc.md");
+      await writeFile(file, "# hi\n", "utf8");
+      const reg = createSessionRegistry({ broadcast: () => {} });
+      const sess = reg.register({ filePath: file });
+      try {
+        async function addComment(id: string) {
+          return sess.withWriteLock(async () => {
+            const doc = await sess.sidecar.load();
+            if (!Array.isArray(doc.comments)) doc.comments = [];
+            // Force the two calls to overlap mid-cycle — exactly the
+            // window that loses an update if the two aren't serialized.
+            await new Promise((r) => setTimeout(r, 20));
+            doc.comments.push({
+              id,
+              author: "tester",
+              timestamp: "2026-01-01T00:00:00Z",
+              text: id,
+              resolved: false,
+            });
+            await sess.sidecar.save(doc);
+          });
+        }
+
+        await Promise.all([addComment("c1"), addComment("c2")]);
+
+        const final = await sess.sidecar.load();
+        expect(final.comments.map((c) => c.id).sort()).toEqual(["c1", "c2"]);
+      } finally {
+        await reg.unregister(sess.docId);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("watcher fires on atomic rename writes (vim/Edit-tool save pattern)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "mark-it-watcher-"));
     try {

@@ -8,13 +8,17 @@ import { docIdForSpec } from "../daemon/ids.js";
 interface RegistryDeps {
   registry: SessionRegistry;
   db?: Db;
-  defaultSession?: Session | null;
   /** Daemon origin (resolved lazily — Vite's listen port isn't known at plugin-construction time). */
   origin: () => string;
   /** Token to include on the returned URL so the browser can authenticate. */
   token: string;
   /** Called when client activity should reset the daemon's idle timer. */
   bumpActivity?: () => void;
+}
+
+interface RegisterRequestBody extends ActiveDocumentSpec {
+  /** Caller-resolved identity for this doc, e.g. from `mark-it open --org/--project/--user`. */
+  session?: Session | null;
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -58,16 +62,30 @@ export function markItRegistryPlugin(deps: RegistryDeps): Plugin {
           return;
         }
         try {
-          const spec = await readJson<ActiveDocumentSpec>(req);
+          const body = await readJson<RegisterRequestBody>(req);
+          const { session, ...spec } = body;
           if (!spec.filePath) {
             json(res, 400, { error: "filePath required" });
+            return;
+          }
+          if (session && !deps.db) {
+            // A session with no DB behind it would silently fall back to
+            // disk persistence (see daemon/sessions.ts's makeStore) despite
+            // --org/--project/--user — fail loudly instead. This daemon was
+            // spawned without --db, or with a different one than the caller
+            // resolved its org/project/document against.
+            json(res, 409, {
+              error:
+                "mark-it: daemon has no database open — restart it with a matching --db, " +
+                "or drop --org/--project/--user for disk-sidecar mode",
+            });
             return;
           }
           const newId = docIdForSpec(spec);
           const wasRegistered = deps.registry.get(newId) !== undefined;
           const sess = deps.registry.register(spec, {
             db: deps.db,
-            session: deps.defaultSession ?? null,
+            session: session ?? null,
           });
           deps.registry.setActive(sess.docId);
 

@@ -163,13 +163,12 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
       markItRegistryPlugin({
         registry,
         db: opts.db,
-        defaultSession: null,
         origin: () => originHolder.value,
         token,
         bumpActivity: () => lifecycle.bump(),
       }),
       markItDocumentPlugin(registry),
-      markItSidecarPlugin(registry, null),
+      markItSidecarPlugin(registry),
       markItEventsPlugin(registry, {
         onConnect: () => lifecycle.bump(),
         onDocConnect: cancelUnregister,
@@ -179,8 +178,8 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<void> {
       // (events.onDocConnect). Tail learns the session is over via `done`.
       markItAgentStreamPlugin(registry),
       markItAgentPlugin(registry),
-      markItSessionPlugin(registry, null, opts.db),
-      markItTreePlugin(opts.db, null, registry),
+      markItSessionPlugin(registry, opts.db),
+      markItTreePlugin(opts.db, registry),
     ],
     define: {
       __MARK_IT_FILE_NAME__: JSON.stringify("(daemon)"),

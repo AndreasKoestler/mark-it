@@ -46,6 +46,20 @@ function anchorPresentInSource(text: string | undefined, source: string): boolea
 }
 
 /**
+ * True when `anchored_text` is a real re-anchor candidate (differs from
+ * `selected_text`) that's actually findable in `source` right now. The only
+ * place that decides "is this anchor live" — both the render projection
+ * below and the sidebar's drift badge must agree with this, or one can show
+ * a confident highlight while the other says the anchor is lost.
+ */
+export function anchoredTextIsLive(comment: Comment, source: string): boolean {
+  const ext = comment as Comment & { anchored_text?: string };
+  const anchored = ext.anchored_text;
+  if (!anchored || anchored === comment.selected_text) return false;
+  return source.includes(anchored);
+}
+
+/**
  * Re-anchor-aware projection for renderers. The Sidemark spec keeps
  * `selected_text` immutable, but renderers (e.g. `@mrsf/rehype-mrsf`'s
  * `MrsfController`) search the live document for that exact string — they
@@ -84,7 +98,7 @@ export function commentsForRender(doc: MrsfDocument, source?: string): MrsfDocum
       // means stale anchored_text and stale score can persist long after
       // the line they pointed at has been edited. Don't trust the metadata
       // unless it agrees with the current document.
-      const anchoredIsLive = source == null || source.includes(anchored);
+      const anchoredIsLive = source == null || anchoredTextIsLive(c, source);
       if (anchoredIsLive) {
         const isContentPerfect = score != null && score >= PERFECT_SCORE;
         // Perfect-score match: anchored differs only in formatting (source

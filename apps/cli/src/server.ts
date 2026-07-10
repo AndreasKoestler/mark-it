@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
@@ -10,6 +11,7 @@ import {
   type SessionRegistry,
 } from "./daemon/sessions.js";
 import { docIdForSpec } from "./daemon/ids.js";
+import { markItAuthPlugin } from "./daemon/auth-plugin.js";
 import { markItDocumentPlugin } from "./plugins/document.js";
 import { markItSidecarPlugin } from "./plugins/sidecar.js";
 import { markItAgentPlugin } from "./plugins/agent.js";
@@ -129,6 +131,13 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
 
   const reanchorPromise = initialDoc.ensureFreshAnchors();
 
+  // Only session-bearing (multi-user/DB) runs need a token: /api/session
+  // reveals the real userId/handle in that mode, and enforceIdentity's check
+  // is only meaningful if that identity isn't freely readable by anyone who
+  // can reach the port. Plain single-user legacy mode has no identity to
+  // protect, so it stays frictionless with no token, as documented.
+  const token = opts.session ? randomBytes(32).toString("hex") : null;
+
   const server = await createServer({
     root: WEB_ROOT,
     server: {
@@ -149,9 +158,10 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
       exclude: ["@mark-it/core", "@mark-it/react"],
     },
     plugins: [
+      ...(token ? [markItAuthPlugin(token)] : []),
       react({ jsxRuntime: "automatic" }),
       markItDocumentPlugin(registry),
-      markItSidecarPlugin(registry, opts.session ?? null),
+      markItSidecarPlugin(registry),
       markItEventsPlugin(registry, {
         globalClients: lifecycle.clients,
         onConnect: () => lifecycle.onClientConnect(),
@@ -159,8 +169,8 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
       }),
       markItAgentStreamPlugin(registry),
       markItAgentPlugin(registry),
-      markItSessionPlugin(registry, opts.session ?? null, opts.db),
-      markItTreePlugin(opts.db, opts.session ?? null, registry),
+      markItSessionPlugin(registry, opts.db),
+      markItTreePlugin(opts.db, registry),
     ],
     define: {
       __MARK_IT_FILE_NAME__: JSON.stringify(basename(opts.initialActive.filePath)),
@@ -170,13 +180,15 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
 
   await server.listen();
   const url = server.resolvedUrls?.local[0] ?? `http://localhost:${opts.port}/`;
+  const openUrl = token ? `${url}?token=${encodeURIComponent(token)}` : url;
   server.printUrls();
   console.error(`mark-it: serving ${opts.initialActive.filePath}`);
+  if (token) console.error(`mark-it: token=${token}`);
 
   await reanchorPromise;
 
   if (opts.open) {
-    openBrowser(url);
+    openBrowser(openUrl);
   }
 }
 

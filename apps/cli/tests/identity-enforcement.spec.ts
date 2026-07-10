@@ -32,6 +32,34 @@ async function waitForServer(url: string, timeoutMs = 25_000): Promise<void> {
   throw new Error(`Server at ${url} did not become ready within ${timeoutMs}ms`);
 }
 
+/**
+ * A session-bearing `startServer` run generates a random auth token and
+ * prints `mark-it: token=<token>` to stderr (see server.ts). Buffers stderr
+ * from spawn time so the line isn't missed if it arrives before this is
+ * called.
+ */
+function watchForToken(child: ChildProcess): () => Promise<string> {
+  let buf = "";
+  child.stderr?.on("data", (c: Buffer) => (buf += c.toString()));
+  return (timeoutMs = 25_000) =>
+    new Promise((resolveToken, reject) => {
+      const deadline = Date.now() + timeoutMs;
+      const poll = () => {
+        const m = buf.match(/mark-it: token=([0-9a-f]+)/);
+        if (m) {
+          resolveToken(m[1]!);
+          return;
+        }
+        if (Date.now() > deadline) {
+          reject(new Error(`token not seen on stderr within ${timeoutMs}ms (got: ${buf})`));
+          return;
+        }
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
+}
+
 function spawnMarkItDb(
   dbPath: string,
   port: number,
@@ -83,14 +111,16 @@ test("identity enforcement: forged author/x_user_id returns 403", async () => {
 
   const child = spawnMarkItDb(dbPath, IDENTITY_PORT);
   const serverUrl = `http://localhost:${IDENTITY_PORT}`;
+  const getToken = watchForToken(child);
 
   try {
     await waitForServer(`${serverUrl}/api/session`);
+    const token = await getToken();
 
     // Forge a different author + x_user_id — should get 403
     const res = await fetch(`${serverUrl}/api/sidecar`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Mark-It-Token": token },
       body: JSON.stringify({
         action: "add",
         payload: {
@@ -115,12 +145,16 @@ test("identity enforcement: correct author/x_user_id returns 200", async () => {
   const port = IDENTITY_PORT + 1;
   const child = spawnMarkItDb(dbPath, port);
   const serverUrl = `http://localhost:${port}`;
+  const getToken = watchForToken(child);
 
   try {
     await waitForServer(`${serverUrl}/api/session`);
+    const token = await getToken();
+    const auth = { "X-Mark-It-Token": token };
 
-    // Fetch session to get the real userId
-    const sessionRes = await fetch(`${serverUrl}/api/session`);
+    // Fetch session (with the token — it's no longer readable anonymously)
+    // to get the real userId.
+    const sessionRes = await fetch(`${serverUrl}/api/session`, { headers: auth });
     const session = (await sessionRes.json()) as { user?: { id: string; handle: string } };
     const userId = session.user?.id!;
     const handle = session.user?.handle!;
@@ -128,7 +162,7 @@ test("identity enforcement: correct author/x_user_id returns 200", async () => {
     // Use the correct author + x_user_id — should get 200
     const res = await fetch(`${serverUrl}/api/sidecar`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...auth },
       body: JSON.stringify({
         action: "add",
         payload: {
@@ -153,14 +187,17 @@ test("identity enforcement: MARK_IT_ALLOW_AUTHOR_OVERRIDE=1 bypasses check", asy
   const port = IDENTITY_PORT + 2;
   const child = spawnMarkItDb(dbPath, port, { MARK_IT_ALLOW_AUTHOR_OVERRIDE: "1" });
   const serverUrl = `http://localhost:${port}`;
+  const getToken = watchForToken(child);
 
   try {
     await waitForServer(`${serverUrl}/api/session`);
+    const token = await getToken();
 
-    // Forged author — override env should bypass the check
+    // Forged author — override env should bypass the identity check (but
+    // the token is still required to reach the endpoint at all).
     const res = await fetch(`${serverUrl}/api/sidecar`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Mark-It-Token": token },
       body: JSON.stringify({
         action: "add",
         payload: {

@@ -87,8 +87,14 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
+    // A refresh() started by an older "change" event can still be in flight
+    // when a newer one fires (e.g. rapid tree-pane doc switching). Track the
+    // latest generation so a slow, superseded response can't partially
+    // overwrite state a newer refresh() already applied.
+    let latestGeneration = 0;
     const fetchOpts: RequestInit = { headers: FETCH_HEADERS };
     async function refresh() {
+      const generation = ++latestGeneration;
       const [doc, sc, ss, tr] = await Promise.all([
         fetch(withParams("/api/document"), fetchOpts).then(
           (r) => r.json() as Promise<DocumentPayload>,
@@ -103,7 +109,7 @@ function App() {
           (r) => r.json() as Promise<TreePayload>,
         ),
       ]);
-      if (cancelled) return;
+      if (cancelled || generation !== latestGeneration) return;
       setDocPayload(doc);
       setSidecar(sc.doc);
       setSession(ss);

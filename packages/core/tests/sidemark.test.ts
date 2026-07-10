@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { commentsForRender, isOrphanedAnchor } from "../src/sidemark.js";
+import { commentsForRender, isOrphanedAnchor, anchoredTextIsLive } from "../src/sidemark.js";
 import type { MrsfDocument, Comment } from "@mrsf/cli";
 
 function doc(comments: Comment[]): MrsfDocument {
@@ -197,5 +197,49 @@ describe("isOrphanedAnchor", () => {
     const source = "- bullet item content\n";
     const c = comment({ selected_text: "bullet item content" });
     expect(isOrphanedAnchor(c, source)).toBe(false);
+  });
+});
+
+describe("anchoredTextIsLive", () => {
+  // This is the single source of truth both commentsForRender (render
+  // projection) and CommentSidebar's drift badge consult — they must agree
+  // on what counts as a live anchor, or one can show a confident highlight
+  // while the other reports the anchor as lost.
+
+  it("is true when anchored_text differs from selected_text and is found in source", () => {
+    const c = comment({
+      selected_text: "old text",
+      ...({ anchored_text: "new text" } as object),
+    });
+    expect(anchoredTextIsLive(c, "the doc now says new text here")).toBe(true);
+  });
+
+  it("is false when anchored_text is not present in source (stale metadata)", () => {
+    const c = comment({
+      selected_text: "old text",
+      ...({ anchored_text: "new text" } as object),
+    });
+    expect(anchoredTextIsLive(c, "neither string appears here")).toBe(false);
+  });
+
+  it("is false when anchored_text equals selected_text (no real re-anchor candidate)", () => {
+    const c = comment({
+      selected_text: "same text",
+      ...({ anchored_text: "same text" } as object),
+    });
+    expect(anchoredTextIsLive(c, "the doc contains same text")).toBe(false);
+  });
+
+  it("is false when anchored_text is absent", () => {
+    const c = comment({ selected_text: "hello" });
+    expect(anchoredTextIsLive(c, "hello world")).toBe(false);
+  });
+
+  it("is true even at a low re-anchor score, as long as the anchor is actually findable — this is what keeps the sidebar's badge from contradicting the rendered highlight", () => {
+    const c = comment({
+      selected_text: "old phrasing",
+      ...({ anchored_text: "new phrasing", x_reanchor_score: 0.2 } as object),
+    });
+    expect(anchoredTextIsLive(c, "document now reads: new phrasing")).toBe(true);
   });
 });

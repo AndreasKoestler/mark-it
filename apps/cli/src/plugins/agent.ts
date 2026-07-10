@@ -53,10 +53,12 @@ export function markItAgentPlugin(registry: SessionRegistry): Plugin {
           const ids = Array.isArray(body.resolveIds) ? body.resolveIds : [];
 
           if (ids.length > 0) {
-            const doc = await sess.sidecar.load();
-            if (!Array.isArray(doc.comments)) doc.comments = [];
-            for (const id of ids) resolveComment(doc, id);
-            await sess.sidecar.save(doc);
+            await sess.withWriteLock(async () => {
+              const doc = await sess.sidecar.load();
+              if (!Array.isArray(doc.comments)) doc.comments = [];
+              for (const id of ids) resolveComment(doc, id);
+              await sess.sidecar.save(doc);
+            });
           }
 
           const env: EventEnvelope = {

@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import type { Plugin } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { SessionRegistry } from "../daemon/sessions.js";
-import { resolveSession, type Session } from "../server.js";
+import { resolveSession } from "../server.js";
 import type { Db } from "../db/index.js";
 import { findDocumentById } from "../db/queries.js";
 
@@ -21,11 +21,7 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
   return JSON.parse(raw) as T;
 }
 
-export function markItSessionPlugin(
-  registry: SessionRegistry,
-  session: Session | null,
-  db?: Db,
-): Plugin {
+export function markItSessionPlugin(registry: SessionRegistry, db?: Db): Plugin {
   return {
     name: "mark-it-session",
     configureServer(server) {
@@ -40,7 +36,7 @@ export function markItSessionPlugin(
           json(res, r.status, { error: r.error });
           return;
         }
-        const { spec, docId } = r.session;
+        const { spec, docId, session } = r.session;
         if (!session) {
           json(res, 200, {
             legacy: true,
@@ -69,7 +65,14 @@ export function markItSessionPlugin(
           res.end();
           return;
         }
-        if (!session || !db) {
+        if (!db) {
+          res.statusCode = 400;
+          res.end();
+          return;
+        }
+        const current = resolveSession(req, registry);
+        const session = "error" in current ? null : current.session.session;
+        if (!session) {
           res.statusCode = 400;
           res.end();
           return;

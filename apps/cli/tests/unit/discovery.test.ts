@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat, mkdir, writeFile, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDiscovery } from "../../src/daemon/discovery.js";
@@ -49,6 +49,53 @@ describe("discovery", () => {
       release();
       const release2 = await d.acquireSpawnLock();
       release2();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("acquireSpawnLock reclaims a lock left behind by a dead process", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mid-"));
+    try {
+      const d = createDiscovery({ home: dir });
+      // Simulate a crashed holder: the lock dir exists with a pid file
+      // recording a process that no longer exists.
+      const lockDir = join(dir, ".mark-it", ".daemon.lock");
+      await mkdir(lockDir, { recursive: true });
+      await writeFile(join(lockDir, "pid"), "999999999", "utf8");
+
+      const release = await d.acquireSpawnLock();
+      release();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("acquireSpawnLock reclaims a lock old enough to be stale even with no pid recorded", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mid-"));
+    try {
+      const d = createDiscovery({ home: dir });
+      // No pid file at all (e.g. crashed before writing it) — must fall
+      // back to age. Backdate the lock dir past the staleness threshold.
+      const lockDir = join(dir, ".mark-it", ".daemon.lock");
+      await mkdir(lockDir, { recursive: true });
+      const old = new Date(Date.now() - 31_000);
+      await utimes(lockDir, old, old);
+
+      const release = await d.acquireSpawnLock();
+      release();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("acquireSpawnLock still rejects a fresh lock held by a live process", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mid-"));
+    try {
+      const d = createDiscovery({ home: dir });
+      const release = await d.acquireSpawnLock();
+      await expect(d.acquireSpawnLock()).rejects.toThrow();
+      release();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
