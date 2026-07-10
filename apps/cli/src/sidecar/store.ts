@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
-import { parse as yamlParse, stringify as yamlStringify } from "yaml";
 import type { MrsfDocument } from "@mrsf/cli";
-import { parseSidecarLenient, writeSidecar } from "@mrsf/cli";
+import { parseSidecarContentLenient, parseSidecarLenient, toYaml, writeSidecar } from "@mrsf/cli";
 import { saveSidecarBlob, loadSidecarBlob } from "../db/queries.js";
 import type { Db } from "../db/index.js";
 
@@ -48,12 +47,20 @@ export class DbSidecarStore implements SidecarStore {
   async load(): Promise<MrsfDocument> {
     const blob = loadSidecarBlob(this.db, this.documentId);
     if (!blob) return { mrsf_version: "1.0", document: this.filePath, comments: [] };
-    const parsed = yamlParse(blob) as MrsfDocument;
-    if (!Array.isArray(parsed.comments)) parsed.comments = [];
-    return parsed;
+    const result = parseSidecarContentLenient(blob, this.filePath);
+    if (result.doc) {
+      if (!Array.isArray(result.doc.comments)) result.doc.comments = [];
+      return result.doc;
+    }
+    console.error(`mark-it: sidecar blob for ${this.documentId} failed to parse: ${result.error}`);
+    return {
+      mrsf_version: "1.0",
+      document: this.filePath,
+      comments: result.partialComments ?? [],
+    };
   }
 
   async save(doc: MrsfDocument): Promise<void> {
-    saveSidecarBlob(this.db, this.documentId, yamlStringify(doc));
+    saveSidecarBlob(this.db, this.documentId, toYaml(doc));
   }
 }
